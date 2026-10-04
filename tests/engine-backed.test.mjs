@@ -209,6 +209,40 @@ test('a miss reports what it did see, so a miss can be told from a misread', { s
   }
 })
 
+test('a region is ignored by verify, because cropping a film would measure the wrong thing', { skip }, async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'dsh-ocr-verify-region-'))
+  try {
+    writeFileSync(join(directory, 'cn.txt'), '给它最小的权限', { encoding: 'utf8' })
+    const fontArg = font.replace(/\\/g, '/').replace(':', '\\:')
+    const clip = join(directory, 'clip.mp4')
+    await run({
+      tool: 'ffmpeg',
+      args: [
+        '-f', 'lavfi', '-i', 'color=c=black:s=640x360:r=10:duration=2',
+        '-vf', `drawtext=textfile='cn.txt':fontfile='${fontArg}':fontcolor=white:fontsize=36:x=(w-tw)/2:y=h-80`,
+        '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', clip,
+      ],
+      cwd: directory,
+      config,
+      timeoutMs: 120_000,
+    })
+    writeFileSync(join(directory, 'subs.srt'), ['1', '00:00:00,200 --> 00:00:01,800', '给它最小的权限', ''].join('\n'), {
+      encoding: 'utf8',
+    })
+
+    const definitions = toolDefinitions(config, logger)
+    // A region that contains none of the subtitle: if it were honoured, the read-back would fail.
+    const verify = await definitions
+      .find((definition) => definition.name === 'text_read')
+      .execute({ action: 'verify', target: 'clip.mp4', srt: 'subs.srt', region: '0,0,80,40', scale: 'auto' }, { cwd: directory })
+
+    assert.equal(verify.ok, true, `region must not reach the reader: ${JSON.stringify(verify.cues)}`)
+    assert.ok(verify.minSimilarity >= verify.matchRatio)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 test('subtitle read-back works end to end on a video with burned subtitles', { skip }, async () => {
   const directory = mkdtempSync(join(tmpdir(), 'dsh-ocr-subs-'))
   try {

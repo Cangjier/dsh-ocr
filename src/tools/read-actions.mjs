@@ -150,8 +150,16 @@ export function createReadActions(config, logger) {
       const target = pathOf(args.target, context.cwd)
       if (!existsSync(target)) throw new OcrPluginError(`text_read verify: 文件不存在：${target}`)
 
+      // `region` and `scale` are read-action arguments, not verify ones: cropping a delivered film
+      // to a corner before looking for its subtitles would silently measure the wrong thing. They
+      // are dropped here rather than passed through to a reader that would honour them.
+      const base = readOptions(args, config, logger)
       const options = {
-        ...readOptions({ ...args, times: undefined, frames: undefined }, config, logger),
+        config: base.config,
+        engine: base.engine,
+        language: base.language,
+        maxSideLen: base.maxSideLen,
+        onLog: base.onLog,
         target,
         srtPath: pathOf(args.srt, context.cwd),
         sampleFrames: Number.isFinite(args.sampleFrames) ? args.sampleFrames : undefined,

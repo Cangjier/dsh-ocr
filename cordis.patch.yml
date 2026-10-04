@@ -1,0 +1,40 @@
+# dsh-ocr bundle patch.
+#
+# 它只贡献一行，且不依赖任何特定 composition：
+#
+#   dsh-ocr  Host 插件：注册 `text_*` 工具（text_read / text_find / text_setup）。
+#            需要 `tools` 服务，在挂载了 @deepseek-ai/dsh-tools 的任何 profile 里都安全。
+#
+# 配置分三类：
+#   - 路径类（ffmpegPath / enginePath）留空即自动推导，换机器不用改
+#   - 引擎选择类（source / defaultEngine）留空即用"装了什么就用什么"
+#   - 没有任何必填项：不装引擎也能用，只是退回 Windows 自带识别
+
+- insert:
+    - id: dsh-ocr
+      name: 'dsh-ocr'
+      config:
+        # ffmpeg/ffprobe 显式路径。null = 本插件 vendor/ffmpeg/bin → 同目录 video-factory
+        # 的 vendor → PATH 依次发现。只有"读视频帧"和"裁剪放大"需要它，读单张图不需要。
+        ffmpegPath: null
+        ffprobePath: null
+
+        # 离线 OCR 引擎
+        # 显式指定引擎可执行文件。null = vendor/ocr/<source>/ → PATH 依次发现
+        enginePath: null
+        # 引擎家族。null = 按文件名判断（RapidOCR-json.exe / PaddleOCR-json.exe）
+        kind: null
+        # 已安装引擎里优先用哪一个。null = 安装时记录的那个
+        source: null
+        # 识别语言：ch / cht / en / japan / korean / cyrillic
+        language: ch
+        # 默认用哪个引擎：auto（离线优先，失败退回 WinRT）/ local / winrt
+        defaultEngine: auto
+        # 长边像素上限。调小更快，调大小字更准
+        maxSideLen: 1024
+        # 单张图的识别超时（毫秒）。PP-OCRv5 那种重量级引擎需要放宽
+        timeoutMs: 180000
+        # 引擎空闲多久后退出，释放几百 MB 常驻内存
+        idleMs: 120000
+        # 默认放大倍数。null = 不放大；"auto" = 小图放大到长边约 1000px（最多 3 倍）
+        scale: null

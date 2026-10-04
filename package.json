@@ -1,0 +1,36 @@
+{
+  "name": "dsh-ocr",
+  "version": "1.0.0",
+  "private": true,
+  "description": "DSH 插件：把「像素里的文字」变成可用的数据——读出每一行的内容与坐标，或反过来按文字找到它在屏幕上的位置。插件只提供确定性动作，看什么、点什么、信不信全部归 DSH。",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": "./index.mjs",
+    "./core": "./src/core/index.mjs",
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "files": [
+    "index.mjs",
+    "src",
+    "cordis.patch.yml",
+    "docs",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "os": [
+    "win32"
+  ],
+  "scripts": {
+    "test": "node --test \"tests/*.test.mjs\"",
+    "check": "node --check index.mjs"
+  }
+}

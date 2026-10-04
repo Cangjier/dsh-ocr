@@ -1,0 +1,19 @@
+# Line endings are normalised to LF in the repository, with one deliberate exception.
+* text=auto eol=lf
+
+# The WinRT fallback is a Windows PowerShell 5.1 script. It works with LF, but CRLF is what a
+# Windows-only script should be checked out as, and it removes a whole class of "it worked in
+# the editor" report.
+*.ps1 text eol=crlf
+
+# Any media that ends up committed stays byte-for-byte.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.mp4 binary
+*.mp3 binary
+*.wav binary
+*.zip binary
+*.7z binary
+*.exe binary
+*.onnx binary

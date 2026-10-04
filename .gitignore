@@ -1,0 +1,27 @@
+# Node
+node_modules/
+*.log
+
+# The vendored OCR engine, fetched by `text_setup {action:"install"}`: 44 MB pruned, 95 MB
+# whole, and reproducible from a pinned release URL plus its sha256 in src/core/install.mjs,
+# so none of it is tracked — not even SOURCE.json, which is a record of what *this* machine
+# installed and where, and whose absolute paths are meaningless anywhere else. The pins that
+# matter live in tracked code.
+vendor/ocr/
+
+# The engine archive lands beside the extraction directory rather than inside it, which is why
+# the top-level pattern does not cover it.
+vendor/*.7z
+vendor/*.zip
+
+# Vendored ffmpeg, when a host asks for a private copy (`text_setup {action:"install",
+# ffmpeg:true}`). A few hundred megabytes, reproducible from a published release, and normally
+# not needed at all: a sibling video-factory checkout, DSH_OCR_FFMPEG or PATH is used instead.
+vendor/ffmpeg/
+
+# Scratch space: throwaway fixtures and smoke scripts.
+tmp/
+
+# Local machine state.
+.DS_Store
+Thumbs.db

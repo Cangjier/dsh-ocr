@@ -233,6 +233,18 @@ test('a reading request with no target is refused before anything is started', a
   await assert.rejects(() => read.execute({ action: 'verify', target: 'nope.mp4' }, { cwd: process.cwd() }), /需要 "srt"/)
 })
 
+test('a region with a batch that contains a video is refused, not applied to every frame', async () => {
+  const { ctx, registered } = fakeContext()
+  apply(ctx, {})
+  const read = registered.find((definition) => definition.name === 'text_read')
+  // The files do not need to exist for this guard: it is about the argument combination, and the
+  // first missing file would report something less useful.
+  await assert.rejects(
+    () => read.execute({ action: 'read', paths: ['a.mp4', 'b.png'], region: '0,0,100,100' }, { cwd: process.cwd() }),
+    /不能同时用/,
+  )
+})
+
 test('a source that is not installable is refused with the list of those that are', async () => {
   const definitions = toolDefinitions(normalizeConfig({}), { info() {}, error() {} })
   const setup = definitions.find((definition) => definition.name === 'text_setup')

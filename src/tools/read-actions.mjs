@@ -16,6 +16,7 @@
 import { existsSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 import { OcrError, findLines, parseRegion, readText } from '../core/engine.mjs'
+import { classify } from '../core/probe.mjs'
 import { verifySubtitles } from '../core/subtitles.mjs'
 import { OcrPluginError } from './shared.mjs'
 
@@ -117,6 +118,19 @@ export function createReadActions(config, logger) {
       }
 
       const options = readOptions(args, config, logger)
+      // One `region` is applied to every file in the call, which is only meaningful when they are
+      // all pictures of the same shape. A video in the batch would silently crop every frame to
+      // that rectangle, so it is refused rather than measured wrongly.
+      if (options.region !== null && requested.length > 1) {
+        const videos = requested.filter((path) => classify(pathOf(path, context.cwd)) === 'video')
+        if (videos.length > 0) {
+          throw new OcrPluginError(
+            `text_read read: "region" 与多文件/视频不能同时用（${videos.length} 个视频会被裁到同一块）。` +
+              '要么只给一张图配 region，要么用 times 分次读视频帧。',
+          )
+        }
+      }
+
       const results = []
       for (const path of requested) {
         const absolute = pathOf(path, context.cwd)

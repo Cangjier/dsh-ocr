@@ -9,7 +9,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { deflateRawSync } from 'node:zlib'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { FFMPEG_ENV, FFPROBE_ENV, PLUGIN_ROOT, findBinary, findCjkFont, resolveCwd } from '../src/core/env.mjs'
@@ -278,8 +278,9 @@ test('the unpacking tool is pinned to a url and a digest, and its digest is only
 
 test('removing a source that is not installed is a no-op, not a failure', () => {
   // The manifest lives in the plugin's own vendor directory, so this test reads and rewrites it.
-  // It only ever removes a source that this run proved absent, which leaves the file as it found
-  // it when an engine IS installed.
+  // It only ever removes a source that this run proved absent, and it puts the directory back the
+  // way it found it — `removeOcr` writes a manifest even when it removed nothing, and leaving that
+  // file behind would make a second run of this suite see a vendor directory that holds no engine.
   const before = existsSync(OCR_MANIFEST) ? readFileSync(OCR_MANIFEST, 'utf8') : null
   const installed = ocrInstallState().sources.filter((source) => source.installed).map((source) => source.id)
   const target = installed.includes('rapidocr-json') ? 'paddleocr-ppocrv5' : 'rapidocr-json'
@@ -291,6 +292,15 @@ test('removing a source that is not installed is a no-op, not a failure', () => 
     assert.ok(['rapidocr-json', 'paddleocr-ppocrv5', null].includes(result.active))
   } finally {
     if (before !== null) writeFileSync(OCR_MANIFEST, before, { encoding: 'utf8' })
+    else {
+      rmSync(OCR_MANIFEST, { force: true })
+      // Only a directory that this test emptied is removed; a hand-placed engine must survive.
+      if (existsSync(OCR_VENDOR_DIR) && readdirSync(OCR_VENDOR_DIR).length === 0) {
+        rmSync(OCR_VENDOR_DIR, { recursive: true, force: true })
+        const parent = join(OCR_VENDOR_DIR, '..')
+        if (existsSync(parent) && readdirSync(parent).length === 0) rmSync(parent, { recursive: true, force: true })
+      }
+    }
   }
 })
 

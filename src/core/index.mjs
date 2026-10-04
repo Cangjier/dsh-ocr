@@ -64,15 +64,21 @@ export {
   IDLE_SHUTDOWN_MS,
   INIT_TIMEOUT_MS,
   INSTALL_HINT,
+  OCR_FAULTS,
+  OcrEnvironmentError,
   OcrError,
   OCR_SCRIPT,
   OCR_TMP_DIR,
   RAPID_LANGUAGES,
   asciiJson,
+  checkEngineStartup,
   describeEngineCode,
+  describeEngineFailure,
   disposeOcrSessions,
   engineState,
   findLines,
+  modelRequirements,
+  noEngineFault,
   normaliseEngineResult,
   normaliseText,
   ocrReport,
@@ -86,6 +92,8 @@ export {
   resolveScale,
   winrtArguments,
 } from './engine.mjs'
+
+export { environmentSummary, inspectFfmpeg, preflightOcr } from './preflight.mjs'
 
 export {
   DEFAULT_LEAD_SECONDS,

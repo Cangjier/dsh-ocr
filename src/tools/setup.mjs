@@ -11,7 +11,7 @@ import { OCR_SOURCES } from '../core/install.mjs'
 import { CWD_PROPERTY, FORCE_PROPERTY, defineFamilyTool } from './shared.mjs'
 
 /** Every action `text_setup` dispatches. */
-export const SETUP_ACTIONS = ['status', 'probe', 'install', 'remove']
+export const SETUP_ACTIONS = ['status', 'probe', 'preflight', 'install', 'remove']
 
 /** Installable engine ids, mirrored from the core installer so the enum cannot drift. */
 const OCR_SOURCE_IDS = Object.keys(OCR_SOURCES)

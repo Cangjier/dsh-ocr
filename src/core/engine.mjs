@@ -41,7 +41,7 @@ import { createInterface } from 'node:readline'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { PLUGIN_ROOT } from './env.mjs'
-import { run } from './ffmpeg.mjs'
+import { FfmpegNotFound, run } from './ffmpeg.mjs'
 import { classify, probe } from './probe.mjs'
 import { OCR_VENDOR_DIR, OCR_SOURCES, preferredSourceId } from './install.mjs'
 
@@ -96,6 +96,198 @@ export class OcrError extends Error {
     super(message)
     this.name = 'OcrError'
   }
+}
+
+/**
+ * The environment faults this plugin can tell apart, and what each one means for the caller.
+ *
+ * The distinction that matters is not "which error" but "whose problem": everything here is a
+ * property of the machine, not of the picture being read, and every one of them has a different
+ * fix. They are named because the alternative is what this vocabulary replaced — a fallback to
+ * the Windows recogniser whose only trace was a note, which reads as a successful call.
+ */
+export const OCR_FAULTS = {
+  'no-engine': {
+    label: '没有安装离线 OCR 引擎',
+    hint: `运行 ${INSTALL_HINT} 安装一个（约 73MB，解包后约 44MB），或明确用 engine:"winrt" 接受 Windows 自带识别的精度。`,
+  },
+  'engine-missing': {
+    label: '引擎可执行文件不存在',
+    hint: '配置里的 enginePath 指向的文件已经不在，或 vendor/ocr 下的安装被移走。用 text_setup {action:"status"} 看现在会走哪一个，然后重装或修正路径。',
+  },
+  'cannot-execute': {
+    label: '引擎可执行文件无法运行',
+    hint: '文件损坏、被杀软/EDR 拦截，或权限不足。重装引擎；装了杀软就把 vendor/ocr 目录加进白名单。',
+  },
+  'runtime-missing': {
+    label: '引擎启动时缺少运行库 DLL',
+    hint: '引擎依赖的运行库没装或版本不符（常见是 VC++ 运行库，或杀软隔离了 DLL）。装上对应运行库，或改用 rapidocr-json（它只依赖 ONNX Runtime 自带的 DLL）。',
+  },
+  'unsupported-cpu': {
+    label: 'CPU 不支持该引擎要求的指令集',
+    hint: 'paddleocr-ppocrv5 要求 AVX。换用 rapidocr-json，或换一台支持 AVX 的机器。',
+  },
+  'models-missing': {
+    label: '引擎缺少模型文件',
+    hint: `安装没有解压完整。运行 ${INSTALL_HINT.replace('}', ', force:true}')} 重装（带 prune 时只保留简中模型）。`,
+  },
+  'init-timeout': {
+    label: '引擎没有在限定时间内完成初始化',
+    hint: '首次加载模型很慢或进程卡住。看 detail 里的引擎输出；确认模型文件完整，并检查杀软是否在扫描它。',
+  },
+  'engine-crashed': {
+    label: '引擎进程崩溃或提前退出',
+    hint: '看 detail 里的引擎输出尾部，那是它自己的抱怨。重装引擎通常能解决解压不完整导致的崩溃。',
+  },
+  'ffmpeg-missing': {
+    label: '缺少 ffmpeg / ffprobe',
+    hint: `只有裁剪放大（region / scale）和视频抽帧需要它们。把它们放进 vendor/ffmpeg/bin/，设置 DSH_OCR_FFMPEG / DSH_OCR_FFPROBE，或用 text_setup {action:"install", ffmpeg:true} 装一份。`,
+  },
+  'not-windows': {
+    label: '当前平台不是 Windows',
+    hint: '两个离线引擎都是 Windows 可执行文件，零安装回退是 WinRT。',
+  },
+  unusable: {
+    label: '离线引擎和 Windows 自带识别都不可用',
+    hint: `先修好其中之一：${INSTALL_HINT}，或让 Windows 的 OCR 组件可用。`,
+  },
+}
+
+/** Windows NTSTATUS exit codes that a failed engine launch actually produces, and what they mean. */
+const WINDOWS_EXIT_FAULTS = new Map([
+  [0xc0000135, { code: 'runtime-missing', reason: '进程缺少运行库 DLL（STATUS_DLL_NOT_FOUND，0xC0000135）' }],
+  [0xc000007b, { code: 'runtime-missing', reason: '依赖的 DLL 架构不符或已损坏（STATUS_INVALID_IMAGE_FORMAT，0xC000007B）' }],
+  [0xc000001d, { code: 'unsupported-cpu', reason: 'CPU 不支持该引擎要求的指令集（STATUS_ILLEGAL_INSTRUCTION，0xC000001D，通常是 AVX）' }],
+  [0xc0000005, { code: 'engine-crashed', reason: '引擎在启动时访问冲突（0xC0000005）' }],
+  [0xc0000409, { code: 'engine-crashed', reason: '引擎被系统的堆栈保护终止（0xC0000409）' }],
+])
+
+/**
+ * Raised when the machine, not the picture, is why OCR cannot be done.
+ *
+ * It carries a machine-readable `code` from {@link OCR_FAULTS} plus the observed reason, so a
+ * caller can act on it: `auto` reports it in the result as `fault`, `local` fails with it, and
+ * `text_setup {action:"preflight"}` returns the same shape as data.
+ */
+export class OcrEnvironmentError extends OcrError {
+  /**
+   * @param {string} code - one of {@link OCR_FAULTS}, or `unusable`.
+   * @param {string} reason - what was actually observed, in the words of this machine.
+   * @param {object} [context] - `{ engine, executable, detail, hint }`.
+   */
+  constructor(code, reason, context = {}) {
+    const known = OCR_FAULTS[code] ?? { label: code, hint: '' }
+    const hint = context.hint ?? known.hint
+    super(
+      [
+        `OCR 环境问题（${code}，${known.label}）：${reason}`,
+        context.detail ? `引擎输出（尾部）：\n${context.detail}` : null,
+        hint ? `怎么办：${hint}` : null,
+      ]
+        .filter((line) => line !== null && line !== '')
+        .join('\n'),
+    )
+    this.name = 'OcrEnvironmentError'
+    this.code = code
+    this.reason = reason
+    this.engine = context.engine ?? null
+    this.executable = context.executable ?? null
+    this.detail = context.detail ?? null
+    this.hint = hint
+  }
+
+  /**
+   * The plain, model-facing form of this fault — the same shape `preflight` returns.
+   * @returns {{code: string, label: string, engine: string|null, executable: string|null, reason: string, hint: string, detail?: string}} the fault.
+   */
+  toFault() {
+    return {
+      code: this.code,
+      label: OCR_FAULTS[this.code]?.label ?? this.code,
+      engine: this.engine,
+      executable: this.executable,
+      reason: this.reason,
+      hint: this.hint,
+      ...(this.detail ? { detail: this.detail } : {}),
+    }
+  }
+}
+
+/**
+ * The fault for "no offline engine at all".
+ *
+ * This is the one condition here that is a *supported configuration* rather than a broken
+ * machine — the Windows recogniser is always there — so the wording says where it looked rather
+ * than implying something failed. Written once because `status`, `preflight` and the activation
+ * log all report it, and three spellings of one fact is how a diagnostic starts to disagree with
+ * itself.
+ *
+ * @returns {{code: string, label: string, engine: null, executable: null, reason: string, hint: string}} the fault.
+ */
+export function noEngineFault() {
+  return {
+    code: 'no-engine',
+    label: OCR_FAULTS['no-engine'].label,
+    engine: null,
+    executable: null,
+    reason: 'vendor/ocr 下没有离线引擎，PATH 里也没有 RapidOCR-json / PaddleOCR-json',
+    hint: OCR_FAULTS['no-engine'].hint,
+  }
+}
+
+/**
+ * Turn what a failed engine launch actually said into a named fault.
+ *
+ * Pure, and tested directly, because this is the difference between "退出码 3221225781" and
+ * "缺少运行库 DLL": the first tells a caller nothing it can act on. The exit-code table comes
+ * first because it is exact; stderr is only consulted when there is no code to trust.
+ *
+ * @param {object} [failure] - the observation.
+ * @param {number|string|null} [failure.code] - the process exit code, or a spawn error code.
+ * @param {string} [failure.stderr] - what the engine wrote before it died.
+ * @param {string|null} [failure.engine] - the engine family.
+ * @param {string|null} [failure.executable] - the executable path.
+ * @param {{missing: string[]}|null} [failure.models] - the model files found to be absent.
+ * @returns {{code: string, reason: string}} a code from {@link OCR_FAULTS} and why.
+ */
+export function describeEngineFailure(failure = {}) {
+  const code = failure.code ?? null
+  const stderr = String(failure.stderr ?? '')
+  const numeric = typeof code === 'number' && Number.isFinite(code) ? code >>> 0 : null
+
+  const known = numeric === null ? undefined : WINDOWS_EXIT_FAULTS.get(numeric)
+  if (known !== undefined) return { ...known }
+
+  const missing = Array.isArray(failure.models?.missing) ? failure.models.missing : []
+  if (/avx|illegal instruction|不支持的指令/i.test(stderr)) {
+    return { code: 'unsupported-cpu', reason: '引擎报错提示 CPU 指令集不受支持（可能是 AVX）' }
+  }
+  if (/\.dll|cannot find|找不到指定|无法加载|not a valid win32/i.test(stderr)) {
+    return { code: 'runtime-missing', reason: '引擎输出提到缺少或无法加载 DLL' }
+  }
+  // A spawn error means the process was never created, so nothing was loaded and the model files
+  // have nothing to do with it: the executable itself is the problem. This is checked before the
+  // model list because a launch failure is the more specific fact of the two.
+  if (typeof code === 'string') {
+    if (code === 'ENOENT') return { code: 'engine-missing', reason: '可执行文件不存在（ENOENT）' }
+    if (code === 'UNKNOWN') {
+      return { code: 'cannot-execute', reason: '可执行文件无法加载（文件损坏、缺少依赖 DLL，或被安全软件拦截）' }
+    }
+    if (code === 'EACCES' || code === 'EPERM') {
+      return { code: 'cannot-execute', reason: `可执行文件无法运行（${code}：权限被拒绝或被安全软件拦截）` }
+    }
+    return { code: 'cannot-execute', reason: `引擎进程无法启动（${code}）` }
+  }
+  if (missing.length > 0) {
+    return { code: 'models-missing', reason: `引擎缺少模型文件：${missing.join('、')}` }
+  }
+  if (/model|模型/i.test(stderr)) {
+    return { code: 'models-missing', reason: '引擎输出提到模型文件（model）' }
+  }
+  if (numeric !== null) {
+    return { code: 'engine-crashed', reason: `引擎启动失败（退出码 ${numeric}，0x${numeric.toString(16)}）` }
+  }
+  return { code: 'engine-missing', reason: '引擎进程无法启动，且没有退出码可判断原因' }
 }
 
 /**
@@ -213,6 +405,36 @@ function walkFiles(root, depth, limit = 2000) {
 }
 
 /**
+ * The files an engine needs on disk before it can read anything.
+ *
+ * This is a *static* check, and it is deliberately reported as a shortfall rather than a verdict:
+ * a recogniser the caller did not name may still be present under the engine's own default, so
+ * "missing" here means "the file this client would pass is not there". What decides whether the
+ * engine really works is starting it — which is what `text_setup {action:"preflight"}` does.
+ *
+ * @param {'rapidocr-json'|'paddleocr-json'} kind - the engine family.
+ * @param {{has: (name: string) => boolean}} layout - the files found beside the executable.
+ * @param {object} [recognition] - recognition options; `language` selects the recogniser.
+ * @returns {{required: string[], missing: string[]}} the file names, and those absent.
+ */
+export function modelRequirements(kind, layout, recognition = {}) {
+  if (kind === 'rapidocr-json') {
+    const detector = ['ch_PP-OCRv4_det_infer.onnx', 'ch_PP-OCRv3_det_infer.onnx'].find((name) => layout.has(name))
+    const language = RAPID_LANGUAGES[recognition.language] ?? RAPID_LANGUAGES.ch
+    // The preferred detector name is what gets reported when neither version is present.
+    const required = [detector ?? 'ch_PP-OCRv4_det_infer.onnx', language.rec, language.keys]
+    return { required, missing: required.filter((name) => !layout.has(name)) }
+  }
+  if (kind === 'paddleocr-json') {
+    // The Paddle package names its model directories inside this config file, so its absence is
+    // the only thing that can be seen from the outside; the engine validates the rest itself.
+    const required = ['config_universal.txt']
+    return { required, missing: required.filter((name) => !layout.has(name)) }
+  }
+  return { required: [], missing: [] }
+}
+
+/**
  * Describe one installed (or explicitly configured) engine.
  *
  * @param {object} candidate - the candidate.
@@ -246,12 +468,18 @@ function describeEngine({ executable, kind, source }, recognition = {}) {
     cwd: home,
     source,
     modelsDir: layout.modelsDir === null ? null : join(home, 'models'),
+    models: modelRequirements(kind, layout, recognition),
     args: ENGINES[kind].argsFor(layout, recognition),
   }
 }
 
 /**
  * Report what the vendored engine directory holds, without starting anything.
+ *
+ * `present` means an engine executable is there — the only fact that decides whether the vendored
+ * copy can read anything. A directory that holds only a leftover manifest is reported as absent,
+ * with `files` showing that something is in it anyway.
+ *
  * @returns {{present: boolean, directory: string, engines: string[], files: number, sizeBytes: number}} the state.
  */
 export function engineState() {
@@ -272,7 +500,7 @@ export function engineState() {
       // A file that vanished mid-listing simply does not count.
     }
   }
-  return { present: files.length > 0, directory: OCR_VENDOR_DIR, engines, files: files.length, sizeBytes }
+  return { present: engines.length > 0, directory: OCR_VENDOR_DIR, engines, files: files.length, sizeBytes }
 }
 
 /**
@@ -285,12 +513,21 @@ export function engineState() {
  * @param {object} config - normalized plugin config.
  * @param {object} [options] - recognition options that affect the argument list.
  * @returns {object|null} an engine descriptor, or null when none is installed.
+ * @throws {OcrEnvironmentError} when a configured engine path no longer exists.
  * @throws {OcrError} when a configured engine cannot be classified.
  */
 export function resolveOcrEngine(config, options = {}) {
   const explicit = config?.ocr?.enginePath
-  if (typeof explicit === 'string' && explicit.trim() !== '' && existsSync(explicit)) {
+  if (typeof explicit === 'string' && explicit.trim() !== '') {
     const path = resolve(explicit)
+    // A configured path that has gone missing is a *stated intent that cannot be honoured*.
+    // Falling through to the vendored engine here would answer from an engine the caller did not
+    // ask for, which is exactly the kind of silent substitution this plugin refuses.
+    if (!existsSync(path)) {
+      throw new OcrEnvironmentError('engine-missing', `config.ocr.enginePath 指向的文件不存在：${path}`, {
+        executable: path,
+      })
+    }
     const kind = kindOf(path, config?.ocr?.kind)
     if (kind === null) {
       throw new OcrError(
@@ -366,7 +603,6 @@ function kindOfName(name) {
  */
 export function ocrReport(config) {
   const state = engineState()
-  const engine = resolveOcrEngine(config)
   const configured = typeof config?.ocr?.enginePath === 'string' && config.ocr.enginePath !== ''
   const report = {
     vendored: state,
@@ -374,8 +610,23 @@ export function ocrReport(config) {
     prefer: config?.ocr?.defaultEngine ?? 'auto',
     winrtFallback: existsSync(OCR_SCRIPT),
   }
+
+  let engine = null
+  try {
+    engine = resolveOcrEngine(config)
+  } catch (error) {
+    // A diagnostic must not fail on the fault it exists to report.
+    if (!(error instanceof OcrEnvironmentError)) throw error
+    report.available = false
+    report.fault = error.toFault()
+    report.note =
+      `${error.reason}。识别会退回 Windows 自带的 WinRT 引擎（中文小字与中英混排会出错）。${error.hint}`
+    return report
+  }
+
   if (engine === null) {
     report.available = false
+    report.fault = noEngineFault()
     report.note =
       '没有可用的离线 OCR 引擎，识别会退回 Windows 自带的 WinRT 引擎（中文小字与中英混排会出错）。' +
       `运行 ${INSTALL_HINT} 下载并解包一个高精度引擎（约 73MB，解包后约 44MB）。`
@@ -387,6 +638,7 @@ export function ocrReport(config) {
   report.executable = engine.executable
   report.source = engine.source
   report.args = engine.args
+  report.models = engine.models
   return report
 }
 
@@ -426,11 +678,22 @@ class EngineSession {
   /** @returns {void} */
   start() {
     if (this.child !== null) return
-    const child = spawn(this.engine.executable, this.engine.args, {
-      cwd: this.engine.cwd,
-      windowsHide: true,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    })
+    let child
+    try {
+      child = spawn(this.engine.executable, this.engine.args, {
+        cwd: this.engine.cwd,
+        windowsHide: true,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      })
+    } catch (error) {
+      // Windows raises some launch failures synchronously (a corrupt image reports `spawn
+      // UNKNOWN` through a throw rather than an `error` event). Both roads must end in the same
+      // named fault, or the diagnosis depends on which one the OS chose.
+      this.child = null
+      this.ready = Promise.reject(this.#launchError(error?.code ?? 'UNKNOWN', false))
+      this.ready.catch(() => undefined)
+      return
+    }
     this.child = child
     this.stderrTail = []
 
@@ -464,31 +727,23 @@ class EngineSession {
       child.on('error', (error) => {
         if (!settled) {
           settled = true
-          rejectReady(new OcrError(`无法启动 OCR 引擎 ${this.engine.executable}：${error.message}`))
+          rejectReady(this.#launchError(error.code ?? 'UNKNOWN', false))
         }
-        this.#fail(new OcrError(`OCR 引擎进程出错：${error.message}`))
+        this.#fail(this.#launchError(error.code ?? 'UNKNOWN', true))
       })
       child.on('close', (code) => {
         // A close before the banner means the engine died on startup: the arguments or the
         // model files are wrong, and the process' own complaint is the useful part.
         if (!settled) {
           settled = true
-          rejectReady(
-            new OcrError(
-              `OCR 引擎启动失败（退出码 ${code}）：${this.engine.executable}\n` +
-                `参数：${this.engine.args.join(' ')}\n` +
-                `引擎输出（尾部）：\n${this.stderrTail.slice(-8).join('\n')}`,
-            ),
-          )
+          rejectReady(this.#launchError(code, true))
         }
         const wasRunning = this.child === child
         this.child = null
         this.reader?.close()
         this.reader = null
         if (wasRunning) {
-          this.#fail(
-            new OcrError(`OCR 引擎进程提前退出（退出码 ${code}）。引擎输出（尾部）：\n${this.stderrTail.slice(-8).join('\n')}`),
-          )
+          this.#fail(this.#launchError(code, true))
         }
       })
       // The engine announces itself on stdout. Model load takes well under a second on both
@@ -497,13 +752,55 @@ class EngineSession {
         if (settled) return
         settled = true
         rejectReady(
-          new OcrError(
-            `OCR 引擎在 ${Math.round(INIT_TIMEOUT_MS / 1000)} 秒内没有完成初始化：${this.engine.executable}\n` +
-              `引擎输出（尾部）：\n${this.stderrTail.slice(-8).join('\n')}`,
-          ),
+          new OcrEnvironmentError('init-timeout', `引擎在 ${Math.round(INIT_TIMEOUT_MS / 1000)} 秒内没有完成初始化`, {
+            engine: this.engine.kind,
+            executable: this.engine.executable,
+            detail: this.stderrTail.slice(-8).join('\n'),
+          }),
         )
       }, INIT_TIMEOUT_MS).unref?.()
     })
+  }
+
+  /**
+   * Name the fault behind a failed launch, from the exit code and what the engine wrote.
+   *
+   * @param {number|string|null} code - the exit code, or the spawn error code.
+   * @param {boolean} launched - whether the OS actually started the process. A process that never
+   *   started cannot have been stopped by a missing model file, so that suspicion is only raised
+   *   for one that did.
+   * @returns {OcrEnvironmentError} the fault, ready to throw.
+   */
+  #launchError(code, launched) {
+    const detail = this.stderrTail.slice(-8).join('\n')
+    const failure = describeEngineFailure({
+      code,
+      stderr: detail,
+      engine: this.engine.kind,
+      executable: this.engine.executable,
+      models: launched ? this.engine.models : null,
+    })
+    return new OcrEnvironmentError(failure.code, failure.reason, {
+      engine: this.engine.kind,
+      executable: this.engine.executable,
+      detail,
+    })
+  }
+
+  /**
+   * Start the process and wait until it announces that it is ready.
+   *
+   * The one place readiness is waited for, so a preflight and a real recognition cannot disagree
+   * about what "the engine started" means.
+   *
+   * @returns {Promise<void>} resolves once the engine can answer.
+   * @throws {OcrEnvironmentError} when it cannot be started.
+   */
+  async ensureReady() {
+    this.start()
+    if (this.idleTimer !== null) clearTimeout(this.idleTimer)
+    await this.ready
+    this.#scheduleIdle()
   }
 
   /**
@@ -558,9 +855,7 @@ class EngineSession {
    * @returns {Promise<object>} the parsed answer.
    */
   async #ask(imagePath) {
-    this.start()
-    if (this.idleTimer !== null) clearTimeout(this.idleTimer)
-    await this.ready
+    await this.ensureReady()
 
     const child = this.child
     if (child === null || child.stdin === null) throw new OcrError('OCR 引擎没有可用的输入通道')
@@ -656,6 +951,49 @@ function sessionFor(engine, options = {}) {
 export function disposeOcrSessions() {
   for (const session of sessions.values()) session.dispose()
   sessions.clear()
+}
+
+/**
+ * Start an engine and wait for it to announce that it is ready, without recognising anything.
+ *
+ * This is the check a file listing cannot make. A missing VC++ runtime, a DLL quarantined by an
+ * antivirus, a model that did not finish unpacking and a CPU without AVX all look identical from
+ * the outside — the executable is there, the directory has files — and all four only become
+ * visible when the process is actually started. It never throws: the fault is the return value.
+ *
+ * @param {object} engine - an engine descriptor from {@link resolveOcrEngine}.
+ * @param {object} [options] - `{ config, timeoutMs, idleMs }`.
+ * @returns {Promise<{attempted: boolean, ok: boolean, engine: string, executable: string, elapsedMs: number, fault?: object}>} the outcome.
+ */
+export async function checkEngineStartup(engine, options = {}) {
+  const started = Date.now()
+  const session = sessionFor(engine, {
+    timeoutMs: options.timeoutMs ?? options.config?.ocr?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    idleMs: options.idleMs ?? options.config?.ocr?.idleMs ?? IDLE_SHUTDOWN_MS,
+  })
+  try {
+    await session.ensureReady()
+    return {
+      attempted: true,
+      ok: true,
+      engine: engine.kind,
+      executable: engine.executable,
+      elapsedMs: Date.now() - started,
+    }
+  } catch (error) {
+    const base = { engine: engine.kind, executable: engine.executable }
+    const fault =
+      error instanceof OcrEnvironmentError
+        ? error.toFault()
+        : {
+            code: 'engine-crashed',
+            label: OCR_FAULTS['engine-crashed'].label,
+            ...base,
+            reason: error instanceof Error ? error.message : String(error),
+            hint: OCR_FAULTS['engine-crashed'].hint,
+          }
+    return { attempted: true, ok: false, ...base, elapsedMs: Date.now() - started, fault }
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -918,6 +1256,7 @@ export async function prepareImage(source, options = {}) {
     try {
       info = await probe(source, options.config ?? {})
     } catch (error) {
+      if (error instanceof FfmpegNotFound) throw ffmpegFault(error)
       throw new OcrError(`无法读取图片尺寸以决定放大倍数：${error instanceof Error ? error.message : String(error)}`)
     }
     width = info.width
@@ -942,9 +1281,23 @@ export async function prepareImage(source, options = {}) {
       timeoutMs: 120_000,
     })
   } catch (error) {
+    if (error instanceof FfmpegNotFound) throw ffmpegFault(error)
     throw new OcrError(`OCR 预处理失败（裁剪/放大）：${error instanceof Error ? error.message : String(error)}`)
   }
   return { path: target, temporary: true, scale, offset }
+}
+
+/**
+ * Turn a missing ffmpeg into the named environment fault it is.
+ *
+ * Cropping and frame extraction are the only two things that need ffmpeg, and a machine without
+ * it is not broken — it simply cannot do those two, which is worth saying in those terms.
+ *
+ * @param {Error} error - the `FfmpegNotFound` that was raised.
+ * @returns {OcrEnvironmentError} the fault, ready to throw.
+ */
+function ffmpegFault(error) {
+  return new OcrEnvironmentError('ffmpeg-missing', error instanceof Error ? error.message.split('\n')[0] : String(error))
 }
 
 /**
@@ -953,15 +1306,17 @@ export async function prepareImage(source, options = {}) {
  * @param {string} imagePath - the image.
  * @param {object} [options] - `{ config, region, scale, language, maxSideLen, timeoutMs, minScore, onLog }`.
  * @returns {Promise<object>} `{ engine, source, lines, text, elapsedMs, dropped }`.
- * @throws {OcrError} when no engine is installed, or recognition fails.
+ * @throws {OcrEnvironmentError} when no engine is installed, or ffmpeg is missing and needed.
+ * @throws {OcrError} when recognition fails.
  */
 export async function recogniseImage(imagePath, options = {}) {
   if (!existsSync(imagePath)) throw new OcrError(`OCR 的输入图片不存在：${imagePath}`)
   const engine = resolveOcrEngine(options.config ?? {}, options)
   if (engine === null) {
-    throw new OcrError(
-      `没有安装离线 OCR 引擎。运行 ${INSTALL_HINT} 安装一个（约 73MB），` +
-        '或用 engine:"winrt" 明确要求 Windows 自带的引擎。',
+    throw new OcrEnvironmentError(
+      'no-engine',
+      '没有安装离线 OCR 引擎',
+      { hint: `运行 ${INSTALL_HINT} 安装一个（约 73MB），或用 engine:"winrt" 明确要求 Windows 自带的引擎。` },
     )
   }
 
@@ -1031,6 +1386,9 @@ export function winrtArguments(imagePath, options = {}, dimensions = {}) {
  */
 export async function recogniseViaWinRT(imagePath, options = {}) {
   if (!existsSync(imagePath)) throw new OcrError(`OCR 的输入图片不存在：${imagePath}`)
+  if (process.platform !== 'win32') {
+    throw new OcrEnvironmentError('not-windows', `当前平台是 ${process.platform}，而两个识别器都是 Windows 的`)
+  }
   if (!existsSync(OCR_SCRIPT)) throw new OcrError(`找不到 WinRT OCR 脚本：${OCR_SCRIPT}`)
 
   // `auto` needs the size, so it is probed only when it was actually asked for and the region
@@ -1115,7 +1473,9 @@ export async function recogniseViaWinRT(imagePath, options = {}) {
  *
  * @param {string} target - an image or a video.
  * @param {object} [options] - `{ config, engine, region, scale, language, maxSideLen, timeoutMs, minScore, frames, times, onLog }`.
- * @returns {Promise<object>} `{ kind, engine, text, lines, frames?, elapsedMs, notes }`.
+ * @returns {Promise<object>} `{ kind, engine, text, lines, frames?, elapsedMs, notes, fault? }`.
+ *   `fault` is present when the answer came from the Windows recogniser because the engine could
+ *   not be used — an environment problem, named and explained.
  * @throws {OcrError} when the file is missing, unsupported, or no engine can read it.
  */
 export async function readText(target, options = {}) {
@@ -1140,11 +1500,14 @@ export async function readText(target, options = {}) {
       }
     }
     const engines = [...new Set(results.map((result) => result.engine))]
+    // One fault is enough to qualify the whole video: every frame was read by the same fallback.
+    const fault = results.map((result) => result.fault).find((entry) => entry !== undefined) ?? null
     return {
       kind: 'video',
       path,
       duration,
       engine: engines.length === 1 ? engines[0] : engines,
+      ...(fault === null ? {} : { fault }),
       frames: results.map((result) => ({
         at: result.at,
         engine: result.engine,
@@ -1165,22 +1528,54 @@ export async function readText(target, options = {}) {
 
 /**
  * Recognise one file with the configured preference, appending notes about fallbacks.
+ *
+ * Degrading is still allowed — a machine with no engine is a supported machine — but it is never
+ * silent any more. An environment fault is carried out of here as a structured `fault` on the
+ * result, so a caller that needs the exact characters can tell "Windows read this" from "the
+ * engine read this" without parsing a note.
+ *
  * @param {string} path - an image path.
  * @param {object} options - the caller's options.
  * @param {string[]} notes - notes collected for the caller.
  * @returns {Promise<object>} the recognition result.
- * @throws {OcrError} when the chosen engine cannot be used.
+ * @throws {OcrError} when the chosen engine cannot be used, or no recogniser can read the file.
  */
 async function recogniseOne(path, options, notes) {
   const preference = options.engine ?? options.config?.ocr?.defaultEngine ?? 'auto'
   if (preference === 'winrt') return recogniseViaWinRT(path, options)
 
+  let failure = null
   try {
     return await recogniseImage(path, options)
   } catch (error) {
     if (preference === 'local') throw error
-    notes.push(`离线引擎不可用，已退回 Windows 自带 OCR：${error instanceof Error ? error.message : String(error)}`)
-    return recogniseViaWinRT(path, options)
+    failure = error
+  }
+
+  const reason = failure instanceof Error ? failure.message.split('\n')[0] : String(failure)
+  const fault = failure instanceof OcrEnvironmentError ? failure.toFault() : null
+  if (fault !== null) {
+    notes.push(
+      `离线引擎不可用（${fault.code}：${fault.label}）——${fault.reason}。` +
+        `已退回 Windows 自带 OCR，它读不出小字与中英混排，不要把它当作原文引用。${fault.hint}`,
+    )
+  } else {
+    notes.push(`离线引擎不可用，已退回 Windows 自带 OCR：${reason}`)
+  }
+
+  try {
+    const read = await recogniseViaWinRT(path, options)
+    return { ...read, ...(fault === null ? {} : { fault }) }
+  } catch (winrtError) {
+    // Both recognisers are unusable: this is not a fallback any more, it is a machine that
+    // cannot read text, and the caller must be told that rather than handed an empty reading.
+    throw new OcrEnvironmentError(
+      'unusable',
+      `离线引擎失败（${reason}），Windows 自带 OCR 也不可用（${
+        winrtError instanceof Error ? winrtError.message.split('\n')[0] : String(winrtError)
+      }）`,
+      { engine: fault?.engine ?? null, executable: fault?.executable ?? null, hint: fault?.hint },
+    )
   }
 }
 
@@ -1222,6 +1617,7 @@ async function readVideoFrames(path, options) {
     }
   } catch (error) {
     for (const frame of frames) rmSync(frame.path, { force: true })
+    if (error instanceof FfmpegNotFound) throw ffmpegFault(error)
     throw new OcrError(`抽帧失败：${error instanceof Error ? error.message : String(error)}`)
   }
   return { duration, frames }

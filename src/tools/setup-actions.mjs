@@ -5,14 +5,15 @@
  * present says so instead of claiming to have installed one, and `status` never starts an engine
  * — it answers "which engine would answer" from the file system alone, which is the difference
  * between a diagnostic you can run at any time and one that costs half a gigabyte of resident
- * memory.
+ * memory. `preflight` is the deliberate opposite: the one action that *does* start the engine,
+ * because a missing runtime DLL or an unpacked-incomplete model set is invisible until it runs.
  *
  * @module dsh-ocr/tools/setup-actions
  */
 import { OCR_SOURCES, installOcr, ocrInstallState, removeOcr } from '../core/install.mjs'
 import { InstallError } from '../core/net.mjs'
 import { ocrReport } from '../core/engine.mjs'
-import { FFMPEG_ENV, FFPROBE_ENV, findBinary, versionOf } from '../core/env.mjs'
+import { inspectFfmpeg, preflightOcr } from '../core/preflight.mjs'
 import { installFfmpeg } from '../core/ffmpeg-install.mjs'
 import { OcrPluginError } from './shared.mjs'
 
@@ -24,19 +25,6 @@ import { OcrPluginError } from './shared.mjs'
 function defaultSource(config) {
   const requested = config?.ocr?.source
   return typeof requested === 'string' && requested !== '' ? requested : undefined
-}
-
-/**
- * Describe one discovered binary, including the version line.
- * @param {'ffmpeg'|'ffprobe'} stem - which binary.
- * @param {object} config - normalized plugin config.
- * @returns {Promise<object|null>} the description, or null when it is not installed.
- */
-async function describeBinary(stem, config) {
-  const explicit = stem === 'ffmpeg' ? config.ffmpegPath : config.ffprobePath
-  const found = findBinary(stem, explicit ?? null)
-  if (found === null) return null
-  return { path: found.path, source: found.source, version: await versionOf(found.path) }
 }
 
 /**
@@ -60,22 +48,16 @@ export function createSetupActions(config, logger) {
      * @returns {Promise<object>} the report.
      */
     async probe() {
-      const ffmpeg = await describeBinary('ffmpeg', config)
-      const ffprobe = await describeBinary('ffprobe', config)
-      const notes = []
-      if (ffmpeg === null || ffprobe === null) {
-        notes.push(
-          '没有找到 ffmpeg/ffprobe。读单张图片（不给 region）不需要它们；读视频帧和裁剪放大需要。' +
-            '把它们放进本插件的 vendor/ffmpeg/bin/，或设置 ' +
-            `${FFMPEG_ENV} / ${FFPROBE_ENV}，或用 text_setup {action:"install", ffmpeg:true} 装一份。`,
-        )
-      } else if (ffmpeg.source === 'sibling' || ffprobe.source === 'sibling') {
-        notes.push(
-          'ffmpeg 来自同目录的 video-factory 检出。能用，但那份检出被移走就会失效——' +
-            '要长期依赖它，请显式设置 ffmpegPath 或 DSH_OCR_FFMPEG。',
-        )
-      }
-      return { ok: ffmpeg !== null && ffprobe !== null, ffmpeg, ffprobe, notes }
+      return inspectFfmpeg(config)
+    },
+
+    /**
+     * Start the engine once and report whether this machine can read text right now.
+     *
+     * @returns {Promise<object>} the preflight report, with `verdict` ready / degraded / unusable.
+     */
+    async preflight() {
+      return preflightOcr(config, {})
     },
 
     /**

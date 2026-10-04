@@ -22,6 +22,7 @@ import {
   IDLE_SHUTDOWN_MS,
   disposeOcrSessions,
 } from './src/core/engine.mjs'
+import { environmentSummary } from './src/core/preflight.mjs'
 
 /** Stable Cordis plugin name. */
 export const name = 'dsh-ocr'
@@ -155,6 +156,20 @@ export function apply(ctx, rawConfig) {
     const outcome = registerTools(toolsCtx, config, ctx.logger)
     if (outcome.registered.length === 0) {
       ctx.logger.error('dsh-ocr: 没有注册任何工具，插件实际上不可用')
+      return
+    }
+    // Say out loud what this machine can currently do. It costs a few stat() calls and starts
+    // nothing: a missing engine is not an error (the Windows recogniser is a supported answer,
+    // so it is logged as information), but an engine that is present and cannot be used is, and
+    // a caller that never learns about either reads a worse transcript with no way to know.
+    try {
+      const environment = environmentSummary(config)
+      const broken = environment.fault !== null && environment.fault.code !== 'no-engine'
+      const line = `dsh-ocr: ${environment.message}`
+      if (broken || environment.verdict === 'unusable') ctx.logger.warn(line)
+      else ctx.logger.info(line)
+    } catch (error) {
+      ctx.logger.warn(`dsh-ocr: 环境检查失败：${error instanceof Error ? error.message : String(error)}`)
     }
   })
 

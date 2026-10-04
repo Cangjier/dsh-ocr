@@ -30,6 +30,7 @@ import {
   readText,
   resolveOcrEngine,
 } from '../core/engine.mjs'
+import { preflightOcr } from '../core/preflight.mjs'
 import { normalizeConfig } from '../../index.mjs'
 
 /** Print a JSON result. */
@@ -94,6 +95,18 @@ const COMMANDS = {
   async engines() {
     emit(ocrReport(normalizeConfig({})))
     return 0
+  },
+
+  /**
+   * The real pre-flight: start the engine and say whether text can be read right now.
+   *
+   * `doctor` lists what is on disk and is the same information `status` gives; this is the check
+   * a file listing cannot make, so it is a separate command rather than a flag on that one.
+   */
+  async preflight() {
+    const report = await preflightOcr(normalizeConfig({}), {})
+    emit(report)
+    return report.ok ? 0 : 1
   },
 
   /** Install, or remove, an offline engine. */
@@ -165,7 +178,8 @@ async function main() {
 用法：node src/bin/ocr.mjs <命令> [选项]
 
 命令：
-  doctor                             体检：装了哪个引擎、ffmpeg 在哪、WinRT 回退是否可用
+  doctor                             体检：装了哪个引擎、ffmpeg 在哪、WinRT 回退是否可用（只查文件）
+  preflight                          预检：真的启动一次引擎，报 ready / degraded / unusable 与故障码
   engines                            只报引擎状态，不读任何东西
   setup [--source <id>] [--archive <本地.7z>] [--prune] [--force] [--remove]
                                      装/卸离线 OCR 引擎（默认 rapidocr-json，MIT）

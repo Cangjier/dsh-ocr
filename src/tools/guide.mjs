@@ -56,9 +56,29 @@ export function rules() {
       id: 'engine-precedence',
       rule:
         'An explicit config path wins; then a vendored engine in vendor/ocr/ (the manifest\'s active source first); then PATH. ' +
+        'A configured path that no longer exists is a fault, not a reason to use a different engine. ' +
         '`text_setup {action:"status"}` names which one answered.',
       why:
         'Two installed engines would otherwise make the choice depend on directory order, and a reading you cannot attribute is a reading you cannot debug.',
+    },
+    {
+      id: 'preflight-before-reading',
+      rule:
+        'Before the first read of a session, run `text_setup {action:"preflight"}` once. It starts the engine and ' +
+        'returns a verdict — ready / degraded / unusable — plus a named fault for whatever stops it.',
+      why:
+        'A missing runtime DLL, a model set that did not finish unpacking and a CPU without the required instruction set ' +
+        'are all invisible from the file system: the executable is there and the directory has files. They do not surface ' +
+        'as an environment error either — they surface as a worse transcript, because the fallback reads the picture anyway.',
+    },
+    {
+      id: 'environment-faults-are-named',
+      rule:
+        'When an environment problem forces a fallback, the result carries `fault` ({code, label, engine, executable, reason, hint}) ' +
+        'and a leading note says the reading is not the accurate kind. `engine:"local"` fails instead of falling back at all.',
+      why:
+        'A silent downgrade turns a wrong transcript into a confident one. The fault codes exist so a caller can act: ' +
+        'no-engine means install, runtime-missing means a runtime, unsupported-cpu means a different engine, ffmpeg-missing means only crops and video are affected.',
     },
     {
       id: 'coordinate-space',
@@ -77,7 +97,7 @@ export function rules() {
     {
       id: 'local-means-local',
       rule:
-        '`engine: "local"` fails loudly when no engine is installed instead of degrading to the Windows recogniser. `engine: "auto"` degrades, and says so in `notes`.',
+        '`engine: "local"` fails loudly when no engine is installed instead of degrading to the Windows recogniser. `engine: "auto"` degrades, and says so in `fault` and `notes`.',
       why:
         'A silent downgrade turns a wrong transcript into a confident one. When a reading has to be right, ask for the engine and take the error.',
     },
@@ -226,7 +246,8 @@ export function createGuideActions() {
           '一次 read 最多 12 个文件；一个视频最多读 24 帧。',
           `临时裁剪件与抽帧写在 ${OCR_TMP_DIR}，用完即删。`,
           `没有引擎时：${INSTALL_HINT}（约 73MB，解包后 44MB 起）。`,
-          '不装引擎也能用：退回 Windows 自带识别，找大标签够用，读小字会错。',
+          '不装引擎也能用：退回 Windows 自带识别，找大标签够用，读小字会错；这次退回会在结果的 fault 与 notes 里写明。',
+          '第一次 read 之前先预检：text_setup {action:"preflight"}（真的启动一次引擎，约 0.3–0.5 s，随后保持热进程）。',
           '本插件不提供云端 OCR：视觉模型给不出逐行文字的像素框。',
         ],
       }

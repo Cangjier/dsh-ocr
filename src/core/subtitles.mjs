@@ -196,9 +196,14 @@ export async function verifySubtitles(options) {
       onLog: options.onLog,
     })
   } catch (error) {
+    // This module never imports the engine, so an error that can describe itself as an
+    // environment fault is asked to, rather than being recognised by class: a failing read-back
+    // that was really a missing engine must not look like a subtitle problem.
+    const fault = typeof error?.toFault === 'function' ? error.toFault() : null
     return {
       engine: null,
       error: error instanceof Error ? error.message.split('\n')[0] : String(error),
+      ...(fault === null ? {} : { fault }),
       cues: [],
       minSimilarity: null,
       meanSimilarity: null,
@@ -248,6 +253,9 @@ export async function verifySubtitles(options) {
   return {
     srt: srtPath,
     engine: recognised.engine ?? null,
+    // A read-back that came from the fallback recogniser measures the recogniser as much as the
+    // subtitles; the fault travels with the numbers so the two can be told apart.
+    ...(recognised.fault === undefined || recognised.fault === null ? {} : { fault: recognised.fault }),
     sampledCues: rows.length,
     totalCues: cues.length,
     cues: rows,

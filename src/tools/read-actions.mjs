@@ -15,13 +15,34 @@
  */
 import { existsSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
-import { OcrError, findLines, parseRegion, readText } from '../core/engine.mjs'
+import { OcrEnvironmentError, OcrError, findLines, parseRegion, readText } from '../core/engine.mjs'
 import { classify } from '../core/probe.mjs'
 import { verifySubtitles } from '../core/subtitles.mjs'
 import { OcrPluginError } from './shared.mjs'
 
 /** How many files one `read` call will take. A page of screenshots, not a library. */
 const MAX_READ_FILES = 12
+
+/**
+ * Turn a core error into the tool error the model sees, keeping the environment fault code.
+ *
+ * The code is on the error object as well as in the message because a failure that carries
+ * `engine-missing` can be acted on programmatically — install an engine — where a paragraph of
+ * prose can only be read.
+ *
+ * @param {string} prefix - the tool and action that failed.
+ * @param {unknown} error - what the core threw.
+ * @returns {unknown} the error to throw.
+ */
+function asToolError(prefix, error) {
+  if (!(error instanceof OcrError)) return error
+  const wrapped = new OcrPluginError(`${prefix}: ${error.message}`)
+  if (error instanceof OcrEnvironmentError) {
+    wrapped.code = error.code
+    wrapped.fault = error.toFault()
+  }
+  return wrapped
+}
 
 /**
  * Resolve one caller-supplied path against the working directory.
@@ -85,6 +106,9 @@ function summarise(result) {
           })),
         }
       : {}),
+    // An environment fault belongs on the result, not only in prose: a caller that needs the
+    // exact characters has to be able to branch on "the engine did not read this".
+    ...(result.fault === undefined || result.fault === null ? {} : { fault: result.fault }),
     notes: result.notes ?? [],
   }
 }
@@ -138,8 +162,7 @@ export function createReadActions(config, logger) {
         try {
           results.push(await readText(absolute, options))
         } catch (error) {
-          if (error instanceof OcrError) throw new OcrPluginError(`text_read read: ${error.message}`)
-          throw error
+          throw asToolError('text_read read', error)
         }
       }
 
@@ -189,6 +212,12 @@ export function createReadActions(config, logger) {
         target,
         ...result,
         notes: [
+          ...(result.fault === undefined || result.fault === null
+            ? []
+            : [
+                `这次回读不是高精度引擎做的（${result.fault.code}：${result.fault.reason}），相似度会被识别器本身拉低；` +
+                  '先修好环境（`text_setup {action:"preflight"}` 会说明缺什么）再判断字幕有没有问题。',
+              ]),
           '相似度是逐字符的最长公共子序列占比，先做全角转半角并去掉标点空白——OCR 读回的是字形，不是 SRT 里的逗号。',
           ...(result.failures.length > 0
             ? [`${result.failures.length}/${result.sampledCues} 条抽样字幕没读回预期文本，逐条看 failures 里的 expected 与 read。`]
@@ -248,8 +277,7 @@ export async function findInFile(args, context, config, logger) {
   try {
     result = await readText(target, options)
   } catch (error) {
-    if (error instanceof OcrError) throw new OcrPluginError(`text_find find: ${error.message}`)
-    throw error
+    throw asToolError('text_find find', error)
   }
 
   const matches = findLines(result.lines, needles, { match: args.match })
@@ -264,6 +292,7 @@ export async function findInFile(args, context, config, logger) {
     best: matches[0] ?? null,
     matches,
     searched: result.lines.map((line) => line.text),
+    ...(result.fault === undefined || result.fault === null ? {} : { fault: result.fault }),
     notes: [
       ...(result.notes ?? []),
       ...(matches.length === 0

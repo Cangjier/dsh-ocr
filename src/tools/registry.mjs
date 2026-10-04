@@ -42,12 +42,12 @@ export const TOOLS = {
       'Use it when the exact characters matter, which is the one question a vision model answers unreliably.',
     needs: [
       'The path to an image or video that exists. Video and any cropping need ffmpeg, which is discovered automatically (this plugin\'s vendor/ffmpeg, a sibling video-factory install, DSH_OCR_FFMPEG, or PATH); a still image with no region needs neither ffmpeg nor ffprobe.',
-      'Nothing installed at all: it falls back to the Windows recogniser, which finds large labels but misreads small mixed-script text. `text_setup {action:"install"}` fixes that.',
+      'An environment that can actually read text. Run `text_setup {action:"preflight"}` once before the first read of a session: it starts the engine and catches what a file listing cannot — a missing runtime DLL, a model set that did not unpack, a configured enginePath that no longer exists. Nothing installed at all: reads fall back to the Windows recogniser, which finds large labels but misreads small mixed-script text, and the result says so in `fault` and `notes`.',
     ],
     next: [
       '`text_find` when the question is where a string is rather than what the picture says.',
       '`text_guide {action:"rules"}` before acting on a coordinate.',
-      '`text_setup {action:"status"}` when a reading looks wrong and the cause might be the engine.',
+      '`text_setup {action:"preflight"}` first when OCR has not been run on this machine yet, or when a reading looked wrong.',
     ],
     actions: {
       read: {
@@ -69,14 +69,16 @@ export const TOOLS = {
           cwd: 'working directory that relative paths resolve against.',
         },
         returns:
-          '{ok, path, kind, engine, elapsedMs, lineCount, dropped, text, lines[{text,score,x,y,width,height,box,center}], notes[]}. ' +
+          '{ok, path, kind, engine, elapsedMs, lineCount, dropped, text, lines[{text,score,x,y,width,height,box,center}], notes[], fault?}. ' +
           'A video result also carries {duration, frames[{at,engine,lineCount,text}]} and each line in `lines` carries the `at` it came from. ' +
-          '`text` joins the lines that cleared minScore; `lines` is never filtered.',
+          '`text` joins the lines that cleared minScore; `lines` is never filtered. ' +
+          '`fault` appears when the answer came from a fallback recogniser because of an environment problem: {code, label, engine, executable, reason, hint}.',
         cost: 'one recognition per image. Measured here: 1.77s for a 1200x1013 screenshot on the default engine, about 0.2s for a small crop. The engine is a persistent child process — the first call pays a ~0.33s model load, later calls do not.',
         pitfalls: [
           'A line whose score is low is still returned in `lines` and still searchable: `text` is the filtered view, not the whole truth.',
           'On a video the times are spread through the whole clip, so the opening title card is not over-represented — but a subtitle that is only on screen for 0.4s can still be missed. Name the seconds with `times` when you know them.',
           '`engine: "local"` fails instead of degrading. That is deliberate: silently dropping to the Windows recogniser is how a wrong transcript becomes a confident one.',
+          '`engine: "auto"` does degrade, but never silently: the result then carries `fault` and a leading note naming the environment problem. `engine` in the result is the one that answered — `winrt` means the characters are the weak kind, so do not quote them as the source text.',
           'Windows OCR returns no confidence score at all, so `score` is null and `minScore` cannot filter it.',
         ],
         example: { action: 'read', target: 'shot.png', region: '600,100,620,56', scale: 'auto', language: 'ch' },
@@ -116,10 +118,12 @@ export const TOOLS = {
       'centre point. The inverse of `text_read`: give it the words, get back the position.',
     needs: [
       'The same engine and ffmpeg situation as `text_read` — Windows OCR as the zero-install fallback, an installed engine for small text.',
+      'A reading that came from the installed engine when the position matters: check `engine` in the result, and `fault` when it is present. `text_setup {action:"preflight"}` answers that before the call.',
     ],
     next: [
       'Feed `best.center` to whatever clicks, or `matches[]` when several hits need deciding between.',
       '`text_read` when you want to see everything on the picture rather than one string.',
+      '`text_setup {action:"preflight"}` when several searches are about to run, so an environment problem surfaces once instead of inside every miss.',
     ],
     actions: {
       find: {
@@ -141,8 +145,9 @@ export const TOOLS = {
           cwd: 'working directory that relative paths resolve against.',
         },
         returns:
-          '{ok, target, engine, elapsedMs, needles, lineCount, matchCount, best, matches[{needle,lineIndex,text,score,x,y,width,height,center}], searched[], notes[]}. ' +
-          '`ok` is true only when something matched. A video result puts the frame time on each match as `at`.',
+          '{ok, target, engine, elapsedMs, needles, lineCount, matchCount, best, matches[{needle,lineIndex,text,score,x,y,width,height,center}], searched[], notes[], fault?}. ' +
+          '`ok` is true only when something matched. A video result puts the frame time on each match as `at`. ' +
+          '`fault` appears when a fallback recogniser answered because of an environment problem.',
         cost: 'one recognition pass, exactly like `read` — searching does not cost extra beyond it.',
         pitfalls: [
           'Matching sees every line the engine produced, including low-confidence ones: a 0.4-score line that says exactly what you asked for is a hit, not noise.',
@@ -157,33 +162,36 @@ export const TOOLS = {
 
   text_setup: {
     purpose:
-      'Provision and inspect the OCR engine: what is installed, which engine a call would use, what an ' +
-      'install would download, and how to take it away again.',
+      'Provision and inspect the OCR engine: what is installed, which engine a call would use, whether it ' +
+      'actually starts, what an install would download, and how to take it away again.',
     needs: [
       'The network and a few dozen megabytes for `install`. Reading a picture with the Windows recogniser needs neither.',
+      'Nothing for `status` and `probe`, which inspect files only. `preflight` starts the engine once (about 0.3–0.5s cold) and leaves it warm.',
     ],
     next: [
       '`text_read` or `text_find` once an engine is installed.',
-      '`status` first whenever a reading looked wrong — it answers "which engine actually did that".',
+      '`preflight` before the first read of a session — it is the only check that catches an engine which is present but cannot run.',
+      '`status` first whenever a reading looked wrong — it answers "which engine actually did that", without starting one.',
     ],
     actions: {
       status: {
         summary: 'report which OCR engine is installed, which one a call would use, and what the fallback is, without reading anything',
         use: 'before trusting a reading, and first whenever text came out wrong: it separates "the engine misread it" from "no engine is installed and Windows read it".',
-        avoid: 'guessing at accuracy problems — this starts no engine and reads nothing, so it cannot itself be slow.',
+        avoid: 'guessing at accuracy problems — this starts no engine and reads nothing, so it cannot itself be slow. It also cannot prove the engine runs: that is `preflight`.',
         required: [],
         args: {
           cwd: 'working directory that relative paths resolve against.',
         },
         returns:
-          '{available, kind, label, executable, source, args, vendored{present,directory,engines[],files,sizeBytes}, configuredPath, prefer, winrtFallback, note?}. ' +
-          '`source` says where the engine came from: `config`, `vendor`, or `path`. Without an engine, `available` is false and `note` names the install action.',
+          '{available, kind, label, executable, source, args, models{required,missing}, vendored{present,directory,engines[],files,sizeBytes}, configuredPath, prefer, winrtFallback, fault?, note?}. ' +
+          '`source` says where the engine came from: `config`, `vendor`, or `path`. Without an engine, `available` is false and `fault` names why in the same shape `preflight` uses.',
         cost: 'file inspection only: no process is started, nothing is moved.',
         pitfalls: [
           '`available: true` with `kind: "winrt"` is impossible — WinRT is the fallback and is reported separately as `winrtFallback`.',
+          '`available: true` means an engine *was found*, not that it works: a missing runtime DLL or a half-unpacked model set is invisible here. `preflight` is what starts it.',
         ],
         example: { action: 'status' },
-        seeAlso: ['install', 'probe', 'text_read'],
+        seeAlso: ['preflight', 'install', 'probe', 'text_read'],
       },
       probe: {
         summary: 'report whether ffmpeg and ffprobe were found, and where each one came from',
@@ -199,7 +207,28 @@ export const TOOLS = {
           'A `sibling` source means the binary lives in another checkout. It works, but a machine that moves that checkout will lose it — set ffmpegPath or DSH_OCR_FFMPEG to make it explicit.',
         ],
         example: { action: 'probe' },
-        seeAlso: ['status'],
+        seeAlso: ['status', 'preflight'],
+      },
+      preflight: {
+        summary: 'start the OCR engine once and report whether this machine can read text right now, with a named fault for whatever stops it',
+        use: 'before the first read of a session, and again after an install',
+        avoid: 'running it before every read — it starts the engine, so it pays one cold start and leaves a warm process behind; `status` is the free version. It is also not a substitute for a real read: it proves the engine starts, not that any particular picture is legible.',
+        required: [],
+        args: {
+          cwd: 'working directory that relative paths resolve against.',
+        },
+        returns:
+          '{ok, verdict, platform{ok,name}, engine{available,kind,label,executable,source,models{required,missing},start{attempted,ok,elapsedMs,fault?}}|{available:false,fault}, fallback{winrt,script}, ffmpeg{ok,ffmpeg,ffprobe,notes}, checks[{id,ok,detail}], notes[]}. ' +
+          '`verdict` is `ready` (an offline engine starts), `degraded` (only the Windows recogniser can answer) or `unusable` (nothing can). `ok` is false only for `unusable`.',
+        cost: 'one engine start: about 0.33s for RapidOCR, 0.42s for PaddleOCR, then warm reuse. No image is read, so there is no recognition cost.',
+        pitfalls: [
+          'It catches what a file listing cannot: a missing runtime DLL, a model set that did not unpack, a configured enginePath that no longer exists, a CPU without the instruction set the engine needs.',
+          '`verdict: "degraded"` still means text can be read — but by the Windows recogniser, which misreads small and mixed-script text. Do not quote such a reading as the source text.',
+          'A passing preflight does not promise accuracy on a given screenshot: language, size and crop still decide that. It removes the environment as an explanation for a bad reading.',
+          'The engine started here stays resident until it has been idle for the configured time; that is the point, but it is real memory.',
+        ],
+        example: { action: 'preflight' },
+        seeAlso: ['status', 'install', 'text_read'],
       },
       install: {
         summary: 'download and unpack a pinned offline OCR engine into vendor/ocr/, verify it by SHA-256, and record it as active',
@@ -221,9 +250,10 @@ export const TOOLS = {
           'A hash mismatch refuses the install outright. That is the point: the engine reads text out of your screenshots, so a truncated or substituted package must not become it.',
           'The 7-Zip reader (`7zr.exe`, 0.6MB) is fetched from 7-zip.org, a URL that always serves the current release. Its hash is recorded rather than enforced — a note appears in `notes` when upstream publishes a new one.',
           'Installing is idempotent: a second call with an engine present returns `installed: false` instead of downloading again.',
+          'A successful unpack is not proof that the engine runs on this CPU — run `preflight` afterwards to find out.',
         ],
         example: { action: 'install', source: 'rapidocr-json', prune: true },
-        seeAlso: ['status', 'remove'],
+        seeAlso: ['preflight', 'status', 'remove'],
       },
       remove: {
         summary: 'delete an installed OCR engine from vendor/ocr/, or every engine and the unpacking tools with it',
@@ -239,7 +269,7 @@ export const TOOLS = {
           'Removing the last engine is not a failure: reading still works through the Windows recogniser, just less accurately.',
         ],
         example: { action: 'remove', source: 'paddleocr-ppocrv5' },
-        seeAlso: ['install', 'status'],
+        seeAlso: ['install', 'status', 'preflight'],
       },
     },
   },
@@ -284,7 +314,7 @@ export const TOOLS = {
         required: ['actionName'],
         args: {
           actionName:
-            'the action to describe: `read`, `verify`, `find`, `status`, `probe`, `install`, `remove`, `overview`, `tool`, `rules`. It goes in this field, not in `action` — `action` selects this reference action.',
+            'the action to describe: `read`, `verify`, `find`, `status`, `probe`, `preflight`, `install`, `remove`, `overview`, `tool`, `rules`. It goes in this field, not in `action` — `action` selects this reference action.',
           tool: 'disambiguates when the same action name exists in two tools.',
           cwd: 'working directory that relative paths resolve against.',
         },

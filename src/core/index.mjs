@@ -76,23 +76,6 @@ export {
 } from './install.mjs'
 
 export {
-  HOME_DIR_NAME,
-  HOME_ENV,
-  SHARED_FFMPEG_BIN,
-  SHARED_FFMPEG_DIR,
-  SHARED_LIB_DIR,
-  SHARED_MATTE_DIR,
-  SHARED_MODELS_DIR,
-  SHARED_OCR_DIR,
-  SHARED_ROOT,
-  SHARED_RUNTIME_DIR,
-  SHARED_YAMNET_DIR,
-  binaryName,
-  sharedHomeState,
-  sharedPath,
-} from './home.mjs'
-
-export {
   AUTO_TARGET_LONG_SIDE,
   DEFAULT_MAX_SIDE_LEN,
   DEFAULT_MIN_SCORE,

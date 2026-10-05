@@ -43,7 +43,7 @@ import { dirname, join, resolve } from 'node:path'
 import { PLUGIN_ROOT } from './env.mjs'
 import { FfmpegNotFound, run } from './ffmpeg.mjs'
 import { classify, probe } from './probe.mjs'
-import { OCR_VENDOR_DIR, OCR_SOURCES, preferredSourceId } from './install.mjs'
+import { LEGACY_OCR_DIR, OCR_VENDOR_DIR, OCR_SOURCES, preferredSourceId } from './install.mjs'
 
 /** Where a vendored engine lives. Re-exported so a caller can inspect it without a second import. */
 export { OCR_VENDOR_DIR }
@@ -141,7 +141,7 @@ export const OCR_FAULTS = {
   },
   'ffmpeg-missing': {
     label: '缺少 ffmpeg / ffprobe',
-    hint: `只有裁剪放大（region / scale）和视频抽帧需要它们。把它们放进 vendor/ffmpeg/bin/，设置 DSH_OCR_FFMPEG / DSH_OCR_FFPROBE，或用 text_setup {action:"install", ffmpeg:true} 装一份。`,
+    hint: `只有裁剪放大（region / scale）和视频抽帧需要它们。把它们放进共享目录 ~/.dsh-plugins/ffmpeg/bin，设置 DSH_OCR_FFMPEG / DSH_OCR_FFPROBE，或用 text_setup {action:"install", ffmpeg:true} 装一份。`,
   },
   'not-windows': {
     label: '当前平台不是 Windows',
@@ -474,33 +474,57 @@ function describeEngine({ executable, kind, source }, recognition = {}) {
 }
 
 /**
- * Report what the vendored engine directory holds, without starting anything.
+ * Report what the engine directory holds, without starting anything.
  *
  * `present` means an engine executable is there — the only fact that decides whether the vendored
  * copy can read anything. A directory that holds only a leftover manifest is reported as absent,
- * with `files` showing that something is in it anyway.
+ * with `files` showing that something is in it anyway. Both the shared home and the legacy
+ * per-checkout `vendor/ocr` are searched, because a 44 MB engine is not worth moving twice.
  *
- * @returns {{present: boolean, directory: string, engines: string[], files: number, sizeBytes: number}} the state.
+ * @returns {{present: boolean, directory: string, directories: string[], engines: string[], files: number, sizeBytes: number}} the state.
  */
 export function engineState() {
-  if (!existsSync(OCR_VENDOR_DIR)) {
-    return { present: false, directory: OCR_VENDOR_DIR, engines: [], files: 0, sizeBytes: 0 }
-  }
-  const files = walkFiles(OCR_VENDOR_DIR, 4)
-  const engines = []
+  const directories = ocrEngineDirs()
+  let files = 0
   let sizeBytes = 0
-  for (const path of files) {
-    const base = path.split(/[\\/]/).pop()
-    for (const [kind, engine] of Object.entries(ENGINES)) {
-      if (engine.executables.includes(base) && !engines.includes(kind)) engines.push(kind)
-    }
-    try {
-      sizeBytes += statSync(path).size
-    } catch {
-      // A file that vanished mid-listing simply does not count.
+  const engines = []
+  for (const directory of directories) {
+    if (!existsSync(directory)) continue
+    const found = walkFiles(directory, 4)
+    files += found.length
+    for (const path of found) {
+      const base = path.split(/[\\/]/).pop()
+      for (const [kind, engine] of Object.entries(ENGINES)) {
+        if (engine.executables.includes(base) && !engines.includes(kind)) engines.push(kind)
+      }
+      try {
+        sizeBytes += statSync(path).size
+      } catch {
+        // A file that vanished mid-listing simply does not count.
+      }
     }
   }
-  return { present: engines.length > 0, directory: OCR_VENDOR_DIR, engines, files: files.length, sizeBytes }
+  return {
+    present: engines.length > 0,
+    directory: directories[0],
+    directories,
+    engines,
+    files,
+    sizeBytes,
+  }
+}
+
+/**
+ * Every directory an engine could be installed in, nearest first.
+ *
+ * The shared plugin home first — that is where `text_setup {action:"install"}` writes, and where
+ * `dsh-computer-use` looks — then this checkout's legacy `vendor/ocr`, which is where a machine
+ * that installed before the shared home existed still has its engine.
+ *
+ * @returns {string[]} candidate directories.
+ */
+export function ocrEngineDirs() {
+  return [OCR_VENDOR_DIR, LEGACY_OCR_DIR]
 }
 
 /**
@@ -538,22 +562,26 @@ export function resolveOcrEngine(config, options = {}) {
     return describeEngine({ executable: path, kind, source: 'config' }, options)
   }
 
-  // The vendored engines live one directory per source, and the manifest names the active one:
-  // without that, two installed engines would make the choice depend on directory order.
+  // The engines live one directory per source, and the manifest names the active one: without
+  // that, two installed engines would make the choice depend on directory order. The shared home
+  // is searched before the legacy checkout copy.
   const preferred = preferredSourceId(config)
   const ordered = [preferred, ...Object.keys(OCR_SOURCES).filter((id) => id !== preferred)]
-  for (const id of ordered) {
-    const source = OCR_SOURCES[id]
-    for (const name of source?.executables ?? []) {
-      const candidate = join(OCR_VENDOR_DIR, id, name)
-      if (existsSync(candidate)) {
-        return describeEngine({ executable: candidate, kind: source.kind ?? id, source: 'vendor' }, options)
+  for (const directory of ocrEngineDirs()) {
+    for (const id of ordered) {
+      const source = OCR_SOURCES[id]
+      for (const name of source?.executables ?? []) {
+        const candidate = join(directory, id, name)
+        if (existsSync(candidate)) {
+          return describeEngine({ executable: candidate, kind: source.kind ?? id, source: 'vendor' }, options)
+        }
       }
     }
   }
   // A hand-placed engine, or a source this version no longer lists, still has to work.
-  if (existsSync(OCR_VENDOR_DIR)) {
-    for (const path of walkFiles(OCR_VENDOR_DIR, 4)) {
+  for (const directory of ocrEngineDirs()) {
+    if (!existsSync(directory)) continue
+    for (const path of walkFiles(directory, 4)) {
       const kind = kindOf(path)
       if (kind !== null) return describeEngine({ executable: path, kind, source: 'vendor' }, options)
     }

@@ -1,33 +1,34 @@
 /**
- * Provisioning a private copy of ffmpeg, for hosts where borrowing will not do.
+ * Provisioning ffmpeg, into the one directory the whole plugin family shares.
  *
- * This plugin does **not** need its own ffmpeg: a sibling video-factory checkout's build,
- * `DSH_OCR_FFMPEG`, or PATH all work, and reading a still image with no region needs no ffmpeg
- * at all. So this installer exists for the one machine where none of those is true — a host that
- * only ever reads screenshots off video, with no video project beside it.
+ * This plugin does **not** need its own ffmpeg: the shared home, a sibling video-factory
+ * checkout's build, `DSH_OCR_FFMPEG`, or PATH all work, and reading a still image with no region
+ * needs no ffmpeg at all. So this installer exists for the one machine where none of those is
+ * true — a host that only ever reads screenshots and has no video project beside it — and it
+ * writes to `~/.dsh-plugins/ffmpeg/bin`, where the other five plugins will then find it.
  *
- * It is deliberately the *same* pinned release the sibling project uses, so a machine that ends
- * up with both does not end up with two ffmpeg generations that behave differently on the same
- * file. The archive's digest is recorded rather than enforced for the same reason it is there:
- * the release tag is `latest`, so a new upstream build legitimately changes the bytes.
+ * It is deliberately the same release the sibling projects pin, so a machine does not end up with
+ * two ffmpeg generations that behave differently on the same file. The archive's digest is
+ * recorded rather than enforced, because the release tag is `latest`: a new upstream build
+ * legitimately changes the bytes.
  *
  * The extractor is deliberately narrow: it writes only the entries whose base name is one of the
  * wanted binaries, and refuses absolute or parent-relative names, so a hostile archive cannot
- * escape the vendor directory.
+ * escape the target directory.
  *
  * @module dsh-ocr/core/ffmpeg-install
  */
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { PLUGIN_ROOT } from './env.mjs'
 import { InstallError, download } from './net.mjs'
+import { SHARED_FFMPEG_BIN, SHARED_FFMPEG_DIR } from './home.mjs'
 
-/** Where a private build lives. */
-export const FFMPEG_VENDOR_DIR = join(PLUGIN_ROOT, 'vendor', 'ffmpeg')
+/** Where the shared build lives: the same directory `ffmpeg_setup {action:"install"}` writes. */
+export const FFMPEG_VENDOR_DIR = SHARED_FFMPEG_DIR
 
-/** The binary directory discovery looks in fist. */
-export const FFMPEG_VENDOR_BIN_DIR = join(FFMPEG_VENDOR_DIR, 'bin')
+/** The binary directory discovery looks in first. */
+export const FFMPEG_VENDOR_BIN_DIR = SHARED_FFMPEG_BIN
 
 /** BtbN's Windows GPL static build release feed, the same one the sibling plugin pins. */
 export const DEFAULT_RELEASE_BASE = 'https://github.com/BtbN/FFmpeg-Builds/releases/download'
@@ -133,7 +134,7 @@ export async function extractBinaries(archivePath, targetDir, onProgress) {
 }
 
 /**
- * Report what the vendored build currently looks like.
+ * Report what the shared build currently looks like.
  * @returns {{present: boolean, directory: string, files: string[], sizeBytes: number}} the state.
  */
 export function ffmpegVendoredState() {
@@ -153,7 +154,11 @@ export function ffmpegVendoredState() {
 }
 
 /**
- * Remove the private build.
+ * Remove the shared build.
+ *
+ * The directory belongs to the family rather than to this plugin — `dsh-ffmpeg` installs it — so
+ * removing it here is a deliberate act that breaks every plugin until one reinstalls it.
+ *
  * @returns {boolean} whether anything was removed.
  */
 export function removeFfmpegVendored() {
@@ -163,7 +168,7 @@ export function removeFfmpegVendored() {
 }
 
 /**
- * Download and install ffmpeg into this plugin's vendor directory.
+ * Download and install ffmpeg into the shared home.
  *
  * @param {object} [options] - install options.
  * @param {(message: string) => void} [options.onProgress] - progress notes.
@@ -177,6 +182,7 @@ export async function installFfmpeg(options = {}) {
     return { installed: false, reason: '已存在', ...state }
   }
 
+  mkdirSync(FFMPEG_VENDOR_DIR, { recursive: true })
   const scratch = join(FFMPEG_VENDOR_DIR, 'download.zip')
   const failures = []
   for (const archive of ARCHIVE_CANDIDATES) {
@@ -193,11 +199,11 @@ export async function installFfmpeg(options = {}) {
       const files = await extractBinaries(scratch, FFMPEG_VENDOR_BIN_DIR, options.onProgress)
       writeFileSync(
         join(FFMPEG_VENDOR_DIR, 'SOURCE.json'),
-        `${JSON.stringify({ url, bytes, sha256, files, installedAt: new Date().toISOString() }, null, 2)}\n`,
+        `${JSON.stringify({ url, bytes, sha256, files, installedAt: new Date().toISOString(), ownedBy: 'dsh-ffmpeg' }, null, 2)}\n`,
         { encoding: 'utf8' },
       )
       rmSync(scratch, { force: true })
-      return { installed: true, url, bytes, sha256, files }
+      return { installed: true, url, bytes, sha256, files, directory: FFMPEG_VENDOR_DIR }
     } catch (error) {
       failures.push(`${archive}: ${error instanceof Error ? error.message : String(error)}`)
     }
@@ -205,6 +211,6 @@ export async function installFfmpeg(options = {}) {
   rmSync(scratch, { force: true })
   throw new InstallError(
     `所有候选构建都安装失败：\n${failures.map((line) => `  - ${line}`).join('\n')}\n` +
-      '可以手动下载 ffmpeg 静态构建，把 ffmpeg.exe / ffprobe.exe 放进 vendor/ffmpeg/bin/。',
+      `可以手动下载 ffmpeg 静态构建，把 ffmpeg.exe / ffprobe.exe 放进 ${FFMPEG_VENDOR_BIN_DIR}。`,
   )
 }

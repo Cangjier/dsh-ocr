@@ -59,21 +59,33 @@ text_setup {action: "install"}                   # 再调一次：已装则跳�
 | 校验 | 包按 **sha256 硬校验**后才解包；哈希不符直接拒绝安装，**不会**把半截下载当成引擎 |
 | 空闲退出 | 引擎空闲 120 s 自动退出，释放约 500 MB；插件卸载时也会释放 |
 | 网络慢 | `text_setup {action:"install", archive: "D:/下载/xxx.7z"}` 用本地包（sha256 照样校验）。实测 GitHub CDN 会把这次下载限到约 20 KB/s，所以留了这条路 |
-| 解包工具 | 顺带取官方 `7zr.exe`（0.6 MB）放进 `vendor/ocr/tools/`。Windows 自带的 `tar.exe` 解不了 `.7z`（报 `LZMA codec is unsupported`） |
+| 解包工具 | 顺带取官方 `7zr.exe`（0.6 MB）放进 `~/.dsh-plugins/ocr/tools/`。Windows 自带的 `tar.exe` 解不了 `.7z`（报 `LZMA codec is unsupported`） |
 | 云端 | **不做**。视觉模型给不出逐行文字的像素框；要"看懂画面"请让 DSH 自己看图 |
+
+### 引擎装在共享目录里
+
+引擎与 ffmpeg 都装在**共享目录** `~/.dsh-plugins`，不在这份检出里：
+
+```
+~/.dsh-plugins/ocr/<来源>/     离线 OCR 引擎（+ tools/7zr.exe + SOURCE.json）
+~/.dsh-plugins/ffmpeg/bin/     全家六个插件共用的那一份 ffmpeg
+```
+
+按**用户主目录**推导，所以两个用户各有一份；`DSH_PLUGIN_HOME` 可以把整个根换到别处。
+旧位置（本插件 `vendor/ocr`、`vendor/ffmpeg`）仍然读——装过引擎的机器不用搬、不用重下。
 
 ### ffmpeg（可选，且通常不用自己装）
 
 只有两件事需要 ffmpeg：**从视频抽帧**，以及**`region` 裁剪 / `scale` 放大**。读一张静态图、不给 `region`，**不需要 ffmpeg，也不需要 ffprobe**。
 
-发现顺序：配置里的 `ffmpegPath` → 环境变量 `DSH_OCR_FFMPEG` / `DSH_OCR_FFPROBE` → 本插件 `vendor/ffmpeg/bin/` → **同目录 `video-factory` 的 `vendor/ffmpeg/bin/`** → `PATH`。
+发现顺序：配置里的 `ffmpegPath` → 环境变量 `DSH_OCR_FFMPEG` / `DSH_OCR_FFPROBE` → 本插件 `vendor/ffmpeg/bin/` → **共享目录 `~/.dsh-plugins/ffmpeg/bin/`** → 同目录 `video-factory` 的 `vendor/ffmpeg/bin/` → `PATH`。
 
 ```
 text_setup {action: "probe"}                     # 报 ffmpeg/ffprobe 在哪、来自哪一层
-text_setup {action: "install", ffmpeg: true}     # 真要自己一份：装进本插件 vendor/（约 194 MB）
+text_setup {action: "install", ffmpeg: true}     # 真要装一份：装进共享目录（约 194 MB，六个插件共用）
 ```
 
-`probe` 会明确说 `source` 是 `config` / `env` / `vendor` / `sibling` / `path` 里的哪一个——**"在我这能用"必须可解释**。借来的（`sibling`）能用，但那份检出被移走就失效，所以 `probe` 会就此给一条提示。
+`probe` 会明确说 `source` 是 `config` / `env` / `vendor` / `home` / `sibling` / `path` 里的哪一个——**"在我这能用"必须可解释**。`home` 就是共享目录；借来的（`sibling`）能用，但那份检出被移走就失效，所以 `probe` 会就此给一条提示。
 
 ---
 
@@ -273,15 +285,22 @@ src/tools/*.mjs        工具 schema 与 action 实现（唯一知道 DSH 存在
 src/core/*.mjs         确定性内核：纯 ESM、零第三方依赖、可离线单测
 src/bin/ocr.mjs        命令行入口
 src/bin/ocr.ps1        WinRT 回退的包装（PowerShell 5.1 不能直接 await WinRT）
-vendor/ocr/            离线 OCR 引擎（可选；没装就走 Windows 自带识别）
-vendor/ffmpeg/         私有 ffmpeg（可选；通常借用同目录 video-factory 的那份）
+```
+
+静态依赖不在仓库里，在共享目录 `~/.dsh-plugins`：
+
+```
+~/.dsh-plugins/ocr/          离线 OCR 引擎（可选；没装就走 Windows 自带识别）
+~/.dsh-plugins/ffmpeg/bin/   全家共用的 ffmpeg（可选；通常连装都不用装）
+vendor/ocr/                  引擎的旧位置，仍然读（装过就不用搬）
+vendor/ffmpeg/               ffmpeg 的旧位置，仍然读
 ```
 
 内核文件与职责：
 
 | 文件 | 做什么 |
 | --- | --- |
-| `core/engine.mjs` | 引擎发现（配置 → vendor → PATH）、常驻会话协议、结果归一化、**坐标回算**、裁剪放大、图片/视频读取、WinRT 回退、**环境故障码（`OCR_FAULTS` / `describeEngineFailure`）** |
+| `core/engine.mjs` | 引擎发现（配置 → 共享目录 / 旧 vendor → PATH）、常驻会话协议、结果归一化、**坐标回算**、裁剪放大、图片/视频读取、WinRT 回退、**环境故障码（`OCR_FAULTS` / `describeEngineFailure`）** |
 | `core/preflight.mjs` | **预检**：真启动一次引擎并给 ready / degraded / unusable；ffmpeg 发现情况（`probe` 与预检共用同一份实现） |
 | `core/install.mjs` | 引擎清单、sha256 校验、7-Zip 解包、`prune`、装/卸 |
 | `core/subtitles.mjs` | SRT 解析、文本归一化、相似度、按时间点回读比对 |
@@ -332,4 +351,4 @@ vendor/ffmpeg/         私有 ffmpeg（可选；通常借用同目录 video-fact
 
 清单里记录的 sha256 是**首次落盘时的完整性锚点**，用于防篡改与复现，**不构成来源合法性证明**；备选引擎的构建者没有声明许可，商用前请自行核对。
 
-`text_setup {action:"install"}` 的每一步都可审计：下载了什么 URL、字节数多少、sha256 是多少、prune 删了哪些文件，都写进 `vendor/ocr/SOURCE.json`。
+`text_setup {action:"install"}` 的每一步都可审计：下载了什么 URL、字节数多少、sha256 是多少、prune 删了哪些文件，都写进共享目录的 `~/.dsh-plugins/ocr/SOURCE.json`。

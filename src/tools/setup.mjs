@@ -48,7 +48,7 @@ export function createSetupTool(handlers) {
       ffmpeg: {
         type: 'boolean',
         description:
-          'install: also install a private copy of ffmpeg into this plugin\'s own vendor/ffmpeg (about 194MB) instead of borrowing a sibling video-factory build, DSH_OCR_FFMPEG, or PATH.',
+          'install: also install ffmpeg into the shared plugin home (~/.dsh-plugins/ffmpeg/bin, about 194MB) instead of borrowing the dsh-ffmpeg build, DSH_OCR_FFMPEG, or PATH. One install serves every plugin in the family, so this is rarely needed.',
       },
       force: FORCE_PROPERTY,
       cwd: CWD_PROPERTY,

@@ -23,6 +23,7 @@ import {
 } from '../src/core/ffmpeg-install.mjs'
 import {
   DEFAULT_OCR_SOURCE,
+  LEGACY_OCR_DIR,
   OCR_MANIFEST,
   OCR_SOURCES,
   OCR_VENDOR_DIR,
@@ -31,6 +32,7 @@ import {
   readManifest,
   removeOcr,
 } from '../src/core/install.mjs'
+import { SHARED_OCR_DIR } from '../src/core/home.mjs'
 
 /** A temporary directory the caller is expected to remove. */
 function scratch() {
@@ -307,7 +309,10 @@ test('removing a source that is not installed is a no-op, not a failure', () => 
 test('the plugin root resolves to the package directory', () => {
   assert.ok(existsSync(join(PLUGIN_ROOT, 'package.json')))
   assert.ok(existsSync(join(PLUGIN_ROOT, 'index.mjs')))
-  assert.equal(OCR_VENDOR_DIR, join(PLUGIN_ROOT, 'vendor', 'ocr'))
+  // The engine is installed once per user, in the home every plugin in the family shares, rather
+  // than into this checkout: it is 44 MB of download with nothing to do with the source tree.
+  assert.equal(OCR_VENDOR_DIR, SHARED_OCR_DIR)
+  assert.equal(LEGACY_OCR_DIR, join(PLUGIN_ROOT, 'vendor', 'ocr'))
 })
 
 test('the working directory defaults to the process, then to an explicit request', () => {

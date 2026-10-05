@@ -21,18 +21,33 @@ import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statS
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { PLUGIN_ROOT } from './env.mjs'
+import { SHARED_OCR_DIR } from './home.mjs'
 import { InstallError, download, sha256Of } from './net.mjs'
 
 const runFile = promisify(execFile)
 
 /**
- * Where a vendored engine lives.
+ * Where a vendored engine lives: **the shared plugin home**.
+ *
+ * The engine is 44 MB pruned and has nothing to do with this checkout in particular, so it is
+ * installed once per user under `~/.dsh-plugins/ocr/<source>/`. This is also the directory
+ * `dsh-computer-use` reads for an offline engine, which is why it is named after the capability
+ * rather than after this plugin.
  *
  * Defined here rather than in `engine.mjs` because installing is what creates the directory;
  * the client imports the constant from this module, and this module imports nothing from the
  * client.
  */
-export const OCR_VENDOR_DIR = join(PLUGIN_ROOT, 'vendor', 'ocr')
+export const OCR_VENDOR_DIR = SHARED_OCR_DIR
+
+/**
+ * The legacy per-checkout location, still read when the shared home holds no engine.
+ *
+ * A machine that installed the engine before the shared home existed has 44 MB sitting here, and
+ * `engine.mjs` prefers whichever directory actually holds an executable rather than making the
+ * user move it.
+ */
+export const LEGACY_OCR_DIR = join(PLUGIN_ROOT, 'vendor', 'ocr')
 
 /** The manifest that records what is installed and which source is active. */
 export const OCR_MANIFEST = join(OCR_VENDOR_DIR, 'SOURCE.json')
@@ -112,21 +127,53 @@ export function readManifest() {
 }
 
 /**
+ * Every directory an installed engine could be in, nearest first.
+ *
+ * The shared plugin home is where an install writes now; the legacy per-checkout `vendor/ocr` is
+ * still read, because 44 MB of engine is not worth asking anyone to move or re-download.
+ *
+ * @returns {string[]} candidate directories.
+ */
+export function ocrDirs() {
+  return [OCR_VENDOR_DIR, LEGACY_OCR_DIR]
+}
+
+/**
+ * The executable of one engine source, wherever it is installed.
+ *
+ * @param {string} id - an {@link OCR_SOURCES} key.
+ * @returns {{directory: string, executable: string, source: 'home'|'legacy'}|null} the installed engine, or null.
+ */
+export function installedEngine(id) {
+  const source = OCR_SOURCES[id]
+  if (source === undefined) return null
+  for (const directory of ocrDirs()) {
+    for (const name of source.executables) {
+      const path = join(directory, id, name)
+      if (existsSync(path)) {
+        return { directory, executable: path, source: directory === OCR_VENDOR_DIR ? 'home' : 'legacy' }
+      }
+    }
+  }
+  return null
+}
+
+/**
  * Report what is installed, by reading the disk rather than trusting the manifest.
  *
  * The manifest says what an installer *intended*; the executable either exists or it does not,
  * and only the second fact decides whether text can be read.
  *
- * @returns {{active: string|null, totalBytes: number, sources: object[], sevenZip: boolean}} the state.
+ * @returns {{active: string|null, totalBytes: number, sources: object[], sevenZip: boolean, directories: string[]}} the state.
  */
 export function ocrInstallState() {
   const manifest = readManifest()
   const sources = []
   let totalBytes = 0
   for (const [id, source] of Object.entries(OCR_SOURCES)) {
-    const directory = join(OCR_VENDOR_DIR, id)
-    const executable = source.executables.map((name) => join(directory, name)).find((path) => existsSync(path)) ?? null
-    const sizeBytes = directorySize(directory)
+    const found = installedEngine(id)
+    const directory = found?.directory ?? OCR_VENDOR_DIR
+    const sizeBytes = ocrDirs().reduce((sum, root) => sum + directorySize(join(root, id)), 0)
     totalBytes += sizeBytes
     sources.push({
       id,
@@ -134,8 +181,9 @@ export function ocrInstallState() {
       license: source.license,
       measured: source.measured,
       directory,
-      installed: executable !== null,
-      executable,
+      installed: found !== null,
+      executable: found?.executable ?? null,
+      location: found?.source ?? null,
       sizeBytes,
       bytes: source.bytes,
       sha256: source.sha256,
@@ -143,7 +191,7 @@ export function ocrInstallState() {
     })
   }
   totalBytes += directorySize(OCR_TOOLS_DIR)
-  return { active: manifest.active, totalBytes, sources, sevenZip: existsSync(OCR_SEVEN_ZIP) }
+  return { active: manifest.active, totalBytes, sources, sevenZip: existsSync(OCR_SEVEN_ZIP), directories: ocrDirs() }
 }
 
 /**
@@ -427,16 +475,11 @@ export function preferredSourceId(config) {
   const manifest = readManifest()
   const requested = config?.ocr?.source
   if (typeof requested === 'string' && requested !== '' && OCR_SOURCES[requested] !== undefined) {
-    const directory = join(OCR_VENDOR_DIR, requested)
-    if (OCR_SOURCES[requested].executables.some((name) => existsSync(join(directory, name)))) return requested
+    if (installedEngine(requested) !== null) return requested
   }
-  if (manifest.active !== null) {
-    const directory = join(OCR_VENDOR_DIR, manifest.active)
-    if (OCR_SOURCES[manifest.active]?.executables.some((name) => existsSync(join(directory, name)))) return manifest.active
-  }
+  if (manifest.active !== null && installedEngine(manifest.active) !== null) return manifest.active
   for (const id of Object.keys(OCR_SOURCES)) {
-    const directory = join(OCR_VENDOR_DIR, id)
-    if (OCR_SOURCES[id].executables.some((name) => existsSync(join(directory, name)))) return id
+    if (installedEngine(id) !== null) return id
   }
   return requested ?? DEFAULT_OCR_SOURCE
 }

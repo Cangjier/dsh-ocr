@@ -74,7 +74,7 @@ export function resolveTool(stem, config = {}) {
   if (found === null) {
     throw new FfmpegNotFound(
       `找不到 ${stem}。它只在两件事上需要：裁剪/放大图片，以及从视频里抽帧（读单张图用不到）。\n` +
-        `请把它放到本插件的 vendor/ffmpeg/bin/，或设置环境变量 ${stem === 'ffmpeg' ? 'DSH_OCR_FFMPEG' : 'DSH_OCR_FFPROBE'}，` +
+        `请把它放到共享目录 ~/.dsh-plugins/ffmpeg/bin（六个插件共用一份），或设置环境变量 ${stem === 'ffmpeg' ? 'DSH_OCR_FFMPEG' : 'DSH_OCR_FFPROBE'}，` +
         `或让它出现在 PATH 里；装了 video-factory 的话，它自带的 ffmpeg 也会被自动使用。`,
     )
   }

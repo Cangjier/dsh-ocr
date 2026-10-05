@@ -260,7 +260,10 @@ test('the probe reports where each binary came from, so "it worked here" stays e
   for (const key of ['ffmpeg', 'ffprobe']) {
     const binary = probe[key]
     if (binary === null) continue
-    assert.ok(['config', 'env', 'vendor', 'sibling', 'path'].includes(binary.source), `${key} reported an unknown source`)
+    assert.ok(
+      ['config', 'env', 'home', 'vendor', 'sibling', 'path'].includes(binary.source),
+      `${key} reported an unknown source`,
+    )
     assert.ok(binary.path.length > 0)
   }
   if (probe.ffmpeg?.source === 'sibling' || probe.ffprobe?.source === 'sibling') {

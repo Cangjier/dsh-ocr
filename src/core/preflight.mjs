@@ -19,6 +19,7 @@
  */
 import { existsSync } from 'node:fs'
 import { FFMPEG_ENV, FFPROBE_ENV, findBinary, versionOf } from './env.mjs'
+import { SHARED_FFMPEG_BIN } from './home.mjs'
 import {
   OCR_FAULTS,
   OCR_SCRIPT,
@@ -58,13 +59,14 @@ export async function inspectFfmpeg(config = {}) {
   if (ffmpeg === null || ffprobe === null) {
     notes.push(
       '没有找到 ffmpeg/ffprobe。读单张图片（不给 region）不需要它们；读视频帧和裁剪放大需要。' +
-        '把它们放进本插件的 vendor/ffmpeg/bin/，或设置 ' +
+        `把它们放进共享目录 ${SHARED_FFMPEG_BIN}，或设置 ` +
         `${FFMPEG_ENV} / ${FFPROBE_ENV}，或用 text_setup {action:"install", ffmpeg:true} 装一份。`,
     )
   } else if (ffmpeg.source === 'sibling' || ffprobe.source === 'sibling') {
     notes.push(
       'ffmpeg 来自同目录的 video-factory 检出。能用，但那份检出被移走就会失效——' +
-        '要长期依赖它，请显式设置 ffmpegPath 或 DSH_OCR_FFMPEG。',
+        '要长期依赖它，请显式设置 ffmpegPath 或 DSH_OCR_FFMPEG；也可以用 ' +
+        'ffmpeg_setup {action:"install"}（dsh-ffmpeg）装进共享目录。',
     )
   }
   return { ok: ffmpeg !== null && ffprobe !== null, ffmpeg, ffprobe, notes }

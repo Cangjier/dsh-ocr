@@ -3,31 +3,30 @@
  *
  * The plugin owns exactly one external dependency — an OCR engine — and borrows one more,
  * ffmpeg, which it needs only to crop/upscale an image and to pull frames out of a video.
- * Borrowing rather than owning is deliberate: ffmpeg is a few hundred megabytes, a machine
- * that already renders video has it, and reading text off a still image needs none of it.
+ * Borrowing rather than owning is deliberate: ffmpeg is a few hundred megabytes, and reading text
+ * off a still image needs none of it.
  *
- * Discovery follows the precedence the sibling video-factory plugin established — explicit
- * configuration, then a vendored build, then PATH — extended by one case: this plugin will
- * use a sibling `video-factory` checkout's vendored ffmpeg, because the two plugins are
- * normally developed and installed next to each other and re-downloading 194 MB to read a
- * screenshot would be absurd. The sibling candidate is only ever a *candidate*: the report
- * always names which one was found, so "it worked on my machine" stays explainable.
+ * Both live in **the shared plugin home** now (`~/.dsh-plugins`): the engine under `ocr/`, and the
+ * one ffmpeg build the whole family shares under `ffmpeg/bin`. Discovery still accepts the layouts
+ * that existed before it — this plugin's own `vendor/`, then a sibling `video-factory` checkout's
+ * `vendor/ffmpeg/bin` — because a machine that installed a build earlier must not be asked to
+ * download 200 MB again. The candidate that answered is always named in the report, so "it worked
+ * on my machine" stays explainable.
  *
  * @module dsh-ocr/core/env
  */
 import { existsSync } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
+import { PLUGIN_ROOT, SHARED_FFMPEG_BIN, SHARED_FFMPEG_DIR, SHARED_OCR_DIR, binaryName, sharedHomeState } from './home.mjs'
 
 const runFile = promisify(execFile)
 
-/** Plugin package root, resolved from this module so a `link:` install still works. */
-export const PLUGIN_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
+export { PLUGIN_ROOT }
 
-const BINARY_NAME = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'
-const PROBE_NAME = process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe'
+const BINARY_NAME = binaryName('ffmpeg')
+const PROBE_NAME = binaryName('ffprobe')
 
 /** Environment variable that overrides ffmpeg discovery outright. */
 export const FFMPEG_ENV = 'DSH_OCR_FFMPEG'
@@ -52,7 +51,8 @@ export function resolveCwd(config, requested) {
  * Where a sibling plugin's vendored ffmpeg would be.
  *
  * The two hits are the two layouts that actually occur: repositories checked out side by side,
- * and a `link:` install whose real path is the sibling directory.
+ * and a `link:` install whose real path is the sibling directory. The shared home is tried first
+ * by {@link findBinary}; these follow it so an older install keeps working.
  *
  * @returns {string[]} candidate `.../vendor/ffmpeg/bin` directories.
  */
@@ -65,11 +65,11 @@ function siblingBinaryDirectories() {
 
 /**
  * Locate one borrowed binary: explicit config, then the environment, then a vendored build,
- * then a sibling plugin's vendored build, then PATH.
+ * then the shared plugin home, then a sibling plugin's vendored build, then PATH.
  *
  * @param {'ffmpeg'|'ffprobe'} stem - which binary.
  * @param {string|null} explicit - a configured path.
- * @returns {{path: string, source: string}|null} where it was found, or null.
+ * @returns {{path: string, source: 'config'|'env'|'vendor'|'home'|'sibling'|'path'}|null} where it was found, or null.
  */
 export function findBinary(stem, explicit) {
   if (typeof explicit === 'string' && explicit.trim() !== '' && existsSync(explicit)) {
@@ -85,6 +85,9 @@ export function findBinary(stem, explicit) {
   const vendored = join(PLUGIN_ROOT, 'vendor', 'ffmpeg', 'bin', name)
   if (existsSync(vendored)) return { path: vendored, source: 'vendor' }
 
+  const shared = join(SHARED_FFMPEG_BIN, name)
+  if (existsSync(shared)) return { path: shared, source: 'home' }
+
   for (const directory of siblingBinaryDirectories()) {
     const candidate = join(directory, name)
     if (existsSync(candidate)) return { path: candidate, source: 'sibling' }
@@ -99,6 +102,18 @@ export function findBinary(stem, explicit) {
     if (existsSync(candidate)) return { path: candidate, source: 'path' }
   }
   return null
+}
+
+/**
+ * The shared home, as a report.
+ * @returns {object} where the root came from, and the two directories inside it this plugin uses.
+ */
+export function sharedAssetsState() {
+  return {
+    ...sharedHomeState(),
+    ocrDir: SHARED_OCR_DIR,
+    ffmpegDir: SHARED_FFMPEG_DIR,
+  }
 }
 
 /**

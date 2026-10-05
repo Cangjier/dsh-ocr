@@ -41,7 +41,7 @@ export const TOOLS = {
       'its confidence, its pixel box, and the point that can be clicked. ' +
       'Use it when the exact characters matter, which is the one question a vision model answers unreliably.',
     needs: [
-      'The path to an image or video that exists. Video and any cropping need ffmpeg, which is discovered automatically (this plugin\'s vendor/ffmpeg, a sibling video-factory install, DSH_OCR_FFMPEG, or PATH); a still image with no region needs neither ffmpeg nor ffprobe.',
+      'The path to an image or video that exists. Video and any cropping need ffmpeg, which is discovered automatically (the shared plugin home ~/.dsh-plugins/ffmpeg/bin, DSH_OCR_FFMPEG, a sibling video-factory install, or PATH); a still image with no region needs neither ffmpeg nor ffprobe.',
       'An environment that can actually read text. Run `text_setup {action:"preflight"}` once before the first read of a session: it starts the engine and catches what a file listing cannot — a missing runtime DLL, a model set that did not unpack, a configured enginePath that no longer exists. Nothing installed at all: reads fall back to the Windows recogniser, which finds large labels but misreads small mixed-script text, and the result says so in `fault` and `notes`.',
     ],
     next: [
@@ -201,10 +201,10 @@ export const TOOLS = {
         args: {
           cwd: 'working directory that relative paths resolve against.',
         },
-        returns: '{ok, ffmpeg{path,source,version}|null, ffprobe{path,source,version}|null, notes[]}. `source` is one of config / env / vendor / sibling / path, so "it worked on my machine" stays explainable.',
+        returns: '{ok, ffmpeg{path,source,version}|null, ffprobe{path,source,version}|null, notes[]}. `source` is one of config / env / home / vendor / sibling / path, so "it worked on my machine" stays explainable. `home` is the shared plugin home (~/.dsh-plugins/ffmpeg/bin), where every plugin in the family installs and reads one build.',
         cost: 'two process spawns for the version lines.',
         pitfalls: [
-          'A `sibling` source means the binary lives in another checkout. It works, but a machine that moves that checkout will lose it — set ffmpegPath or DSH_OCR_FFMPEG to make it explicit.',
+          'A `sibling` source means the binary lives in another checkout. It works, but a machine that moves that checkout will lose it — set ffmpegPath or DSH_OCR_FFMPEG to make it explicit, or run ffmpeg_setup {action:"install"} to put one in the shared home.',
         ],
         example: { action: 'probe' },
         seeAlso: ['status', 'preflight'],

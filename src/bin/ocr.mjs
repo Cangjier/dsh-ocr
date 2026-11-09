@@ -24,6 +24,7 @@ import {
 import {
   ENGINE_PREFERENCES,
   OcrError,
+  disposeOcrSessions,
   findLines,
   ocrReport,
   parseRegion,
@@ -240,4 +241,18 @@ async function main() {
   }
 }
 
-process.exitCode = await main()
+/**
+ * Run one command and exit.
+ *
+ * **The engine is a persistent child process, so this must dispose of it and exit explicitly.**
+ * Setting `process.exitCode` alone lets the event loop decide when the process is finished — and
+ * the engine's inherited pipe handles keep it alive, so every command would sit there for
+ * `idleMs` (120 s by default) after it had already printed its result and done its work. Measured
+ * on this machine: a four-command script took 363 s instead of about 4 s.
+ *
+ * There is nothing to reuse across commands here — this is a one-shot CLI, not the host — so
+ * tearing the sessions down at the end is both safe and the point.
+ */
+const code = await main()
+disposeOcrSessions()
+process.exit(code)
